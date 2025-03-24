@@ -2,6 +2,7 @@
 
 (require "simpleParser.rkt")
 
+;; Group member: Tongwei Zhang, Xiang Luo, Percy Qian
 ;; ============================
 ;; State Management
 ;; ============================
