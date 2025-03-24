@@ -243,33 +243,70 @@
               ;; 正常情况 - 返回状态
               try-result))))))
 
-;; 循环语句 - 修正continue和break的处理
+;; 循环语句 - 修复循环计数问题
 (define M_state_while
   (lambda (stmt state return break continue throw)
     (call/cc
      (lambda (break-k)
        (letrec ([loop (lambda (state)
                         (if (M_boolean_value (M_value (cadr stmt) state return break-k continue throw))
-                            (call/cc
-                             (lambda (continue-k)
-                               (let ([body-state (M_state (caddr stmt) 
-                                                         state 
-                                                         return 
-                                                         (lambda (s) (break-k s))  ;; 传递状态给外层break
-                                                         (lambda (s) (continue-k (pop-to-original-layers s state)))  ;; 修复continue
-                                                         throw)])
-                                 (loop body-state))))  ;; 递归调用时使用更新后的状态
+                            ;; 如果条件为真,执行循环体
+                            (let* ([body-state 
+                                    (call/cc
+                                     (lambda (continue-k)
+                                       (M_state (caddr stmt) 
+                                               state 
+                                               return 
+                                               (lambda (s) (break-k s))  ;; break跳出整个循环
+                                               continue-k  ;; 简单传递continue-k
+                                               throw)))])
+                              ;; 使用执行后的状态进行下一轮循环
+                              (loop body-state))
+                            ;; 条件为假,结束循环
                             state))])
          (loop state))))))
 
-;; 将状态的作用域层恢复到原始层数(用于continue)
-(define pop-to-original-layers
+;; 合并两个状态,保留当前状态中的变量值,但清除多余层
+(define merge-state
   (lambda (current-state original-state)
-    (let ([original-layers (length original-state)]
-          [current-layers (length current-state)])
-      (if (> current-layers original-layers)
-          (pop-to-original-layers (pop-layer current-state) original-state)
-          current-state))))
+    (cond
+      ;; 处理空状态情况
+      [(null? current-state) original-state]
+      [(null? original-state) current-state]
+      ;; 正常情况
+      [else
+       (let ([current-length (length current-state)]
+             [original-length (length original-state)])
+         (if (= current-length original-length)
+             ;; 长度相同时,合并最外层
+             (cons (merge-layers (car current-state) (car original-state))
+                   (cdr current-state))
+             ;; 长度不同时,递归处理
+             (if (> current-length original-length)
+                 ;; 当前状态层数多,保留当前层但合并内部状态
+                 (cons (car current-state) 
+                       (merge-state (cdr current-state) original-state))
+                 ;; 原始状态层数多,保留原始层同时合并
+                 (cons (merge-layers (car current-state) (car original-state))
+                       (merge-state (cdr current-state) (cdr original-state))))))])))
+
+;; 合并两个层中的变量绑定
+(define merge-layers
+  (lambda (layer1 layer2)
+    (cond
+      [(null? layer1) layer2]
+      [(null? layer2) layer1]
+      [else
+       ;; 将layer1中的绑定合并到layer2中
+       (foldr (lambda (binding result)
+                (let ([var (car binding)])
+                  (if (assq var result)
+                      ;; 变量已存在于layer2,使用layer1的值更新
+                      (cons binding (remove (assq var result) result))
+                      ;; 变量不存在,添加到结果
+                      (cons binding result))))
+              layer2
+              layer1)])))
 
 ;; ============================
 ;; 解释器入口
