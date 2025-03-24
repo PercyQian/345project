@@ -220,19 +220,22 @@
               (let-values ([(exception-val exception-state) (exception-val-state try-result)])
                 (if catch-clause
                     ;; 执行catch块
-                    (let* ([catch-var (cadr catch-clause)]
+                    (let* ([catch-var-expr (cadr catch-clause)]  ;; 这会得到(e)
+                           [catch-var (car catch-var-expr)]  ;; 这样才能得到e
                            [catch-body (caddr catch-clause)]
                            [new-layer (push-layer exception-state)]
-                           [with-exception (state-declare catch-var exception-val new-layer)]
-                           [after-catch 
-                            (foldl 
-                             (lambda (s st)
-                               (M_state s st return break continue throw))
-                             with-exception
-                             catch-body)]
-                           [removed-layer (pop-layer after-catch)]
-                           [final-state (execute-finally removed-layer)])
-                      final-state)
+                           [with-exception (state-declare catch-var exception-val new-layer)])
+                      
+                      ;; 处理catch块内部语句
+                      (let* ([after-catch 
+                              (foldl 
+                               (lambda (s st) 
+                                 (M_state s st return break continue throw))
+                               with-exception
+                               catch-body)]
+                             [removed-layer (pop-layer after-catch)]  
+                             [final-state (execute-finally removed-layer)])
+                        final-state))
                     ;; 无catch块 - 执行finally后继续抛出异常
                     (let ([final-state (execute-finally exception-state)])
                       (throw exception-val final-state))))
@@ -240,7 +243,7 @@
               ;; 正常情况 - 返回状态
               try-result))))))
 
-;; 循环语句 - 改进break/continue的处理
+;; 循环语句 - 修正continue和break的处理
 (define M_state_while
   (lambda (stmt state return break continue throw)
     (call/cc
@@ -253,11 +256,20 @@
                                                          state 
                                                          return 
                                                          (lambda (s) (break-k s))  ;; 传递状态给外层break
-                                                         (lambda (s) (continue-k s))
+                                                         (lambda (s) (continue-k (pop-to-original-layers s state)))  ;; 修复continue
                                                          throw)])
-                                 (loop body-state))))
+                                 (loop body-state))))  ;; 递归调用时使用更新后的状态
                             state))])
          (loop state))))))
+
+;; 将状态的作用域层恢复到原始层数(用于continue)
+(define pop-to-original-layers
+  (lambda (current-state original-state)
+    (let ([original-layers (length original-state)]
+          [current-layers (length current-state)])
+      (if (> current-layers original-layers)
+          (pop-to-original-layers (pop-layer current-state) original-state)
+          current-state))))
 
 ;; ============================
 ;; 解释器入口
@@ -308,3 +320,20 @@
 
 ;; 测试指定文件
 (test-single "test15.txt")
+
+;; 单独测试指定文件列表
+(define test-selected
+  (lambda (filenames)
+    (for-each
+     (lambda (filename)
+       (printf "\n==== 测试 ~a ====\n" filename)
+       (let ([program (parser filename)])
+         (printf "解析结果:\n~a\n" program)
+         (with-handlers ([exn:fail? (lambda (e)
+                                      (printf "错误信息: ~a\n" (exn-message e)))])
+           (let ([result (interpret filename)])
+             (printf "返回结果: ~a\n" result)))))
+     filenames)))
+
+;; 测试特定文件
+(test-selected '("test8.txt" "test10.txt" "test11.txt" "test12.txt"))
