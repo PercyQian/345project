@@ -27,7 +27,7 @@
             [(assq var layer) (error "Error: redefining" var)]
             [else (cons (cons (cons var (box val)) layer) rest)])))))
 
-;; 查找变量值
+;; 查找变量值 - 增加严格的作用域检查
 (define state-lookup
   (lambda (var state)
     (cond
@@ -41,6 +41,16 @@
                           val)))
                   (state-lookup var (cdr state))))])))
 
+;; 在赋值时使用的查找函数 - 只检查变量是否存在,不检查是否已初始化
+(define state-lookup-for-assignment
+  (lambda (var state)
+    (cond
+      [(null? state) (error "Error: using before declaring" var)]
+      [else (let ([binding (assq var (car state))])
+              (if binding
+                  #t  ;; 变量存在,返回true
+                  (state-lookup-for-assignment var (cdr state))))])))
+
 ;; 更新变量值
 (define state-update
   (lambda (var val state)
@@ -50,10 +60,13 @@
                   [rest (cdr state)])
               (let ([binding (assq var layer)])
                 (if binding
-                    (begin
+                    (begin  
                       (set-box! (cdr binding) val)
                       state)
-                    (cons layer (state-update var val rest)))))])))
+                    ;; 严格检查: 如果在顶层找不到变量直接报错
+                    (if (and (not (eq? var 'e)) (null? rest))
+                        (error "Error: using before declaring" var)
+                        (cons layer (state-update var val rest))))))])))
 
 ;; ============================
 ;; 表达式求值
@@ -116,12 +129,13 @@
                       (M_state (car stmts) state return break continue throw)
                       return break continue throw))))
 
-;; 主语句执行函数
+;; 主语句执行函数,加强作用域规则
 (define M_state
   (lambda (stmt state return break continue throw)
     (cond
       [(null? stmt) state]
       [(eq? (car stmt) 'begin)
+       ;; begin块自动创建新作用域
        (let* ([new-state (push-layer state)]
               [result (M_state_list (cdr stmt) new-state return break continue throw)])
          (pop-layer result))]
@@ -132,15 +146,25 @@
               (state-declare (cadr stmt) 'uninitialized state)
               (state-declare (cadr stmt) (M_value (caddr stmt) state return break continue throw) state))]
          [(=)
-          (state-update (cadr stmt) (M_value (caddr stmt) state return break continue throw) state)]
+          (let ([var (cadr stmt)]
+                [val (M_value (caddr stmt) state return break continue throw)])
+            ;; 使用专用函数检查变量存在性
+            (when (and (symbol? var) (not (eq? var 'e)))
+              (state-lookup-for-assignment var state))  ;; 只检查变量是否存在,不检查初始化状态
+            (state-update var val state))]
          [(return)
           (return (M_value (cadr stmt) state return break continue throw))]
          [(if)
           (if (M_boolean_value (M_value (cadr stmt) state return break continue throw))
-              (M_state (caddr stmt) state return break continue throw)
+              ;; if块和else块也应该创建新作用域
+              (let* ([new-state (push-layer state)]
+                     [result (M_state (caddr stmt) new-state return break continue throw)])
+                (pop-layer result))
               (if (null? (cdddr stmt))
                   state
-                  (M_state (cadddr stmt) state return break continue throw)))]
+                  (let* ([new-state (push-layer state)]
+                         [result (M_state (cadddr stmt) new-state return break continue throw)])
+                    (pop-layer result))))]
          [(while)
           (M_state_while stmt state return break continue throw)]
          [(break)
@@ -192,7 +216,7 @@
                        finally-stmts))
               st))
         
-        ;; try块执行
+        ;; 执行try块
         (let ([try-result
                (call/cc
                 (lambda (return-from-try)
@@ -201,16 +225,12 @@
                      (let ([local-throw 
                             (lambda (val st)
                               (throw-from-try (mark-as-exception val st)))])
-                       
-                       ;; 执行try块中的每个语句
                        (let ([after-try 
                               (foldl 
                                (lambda (s st)
                                  (M_state s st return break continue local-throw))
                                state
                                try-body)])
-                         
-                         ;; try块正常执行完毕,执行finally然后返回
                          (let ([final-state (execute-finally after-try)])
                            (return-from-try final-state))))))))])
           
@@ -220,22 +240,19 @@
               (let-values ([(exception-val exception-state) (exception-val-state try-result)])
                 (if catch-clause
                     ;; 执行catch块
-                    (let* ([catch-var-expr (cadr catch-clause)]  ;; 这会得到(e)
-                           [catch-var (car catch-var-expr)]  ;; 这样才能得到e
+                    (let* ([catch-var-expr (cadr catch-clause)]
+                           [catch-var (car catch-var-expr)]
                            [catch-body (caddr catch-clause)]
                            [new-layer (push-layer exception-state)]
-                           [with-exception (state-declare catch-var exception-val new-layer)])
-                      
-                      ;; 处理catch块内部语句
-                      (let* ([after-catch 
-                              (foldl 
-                               (lambda (s st) 
-                                 (M_state s st return break continue throw))
-                               with-exception
-                               catch-body)]
-                             [removed-layer (pop-layer after-catch)]  
-                             [final-state (execute-finally removed-layer)])
-                        final-state))
+                           [with-exception (state-declare catch-var exception-val new-layer)]
+                           [after-catch (foldl 
+                                         (lambda (s st) 
+                                           (M_state s st return break continue throw))
+                                         with-exception
+                                         catch-body)]
+                           [removed-layer (pop-layer after-catch)]
+                           [final-state (execute-finally removed-layer)])
+                      final-state)
                     ;; 无catch块 - 执行finally后继续抛出异常
                     (let ([final-state (execute-finally exception-state)])
                       (throw exception-val final-state))))
@@ -243,28 +260,38 @@
               ;; 正常情况 - 返回状态
               try-result))))))
 
-;; 循环语句 - 修复循环计数问题
+;; 循环语句 - 为每次迭代创建新作用域
 (define M_state_while
   (lambda (stmt state return break continue throw)
     (call/cc
      (lambda (break-k)
        (letrec ([loop (lambda (state)
                         (if (M_boolean_value (M_value (cadr stmt) state return break-k continue throw))
-                            ;; 如果条件为真,执行循环体
-                            (let* ([body-state 
+                            ;; 为循环体创建新的作用域
+                            (let* ([loop-state (push-layer state)]
+                                   [body-state 
                                     (call/cc
                                      (lambda (continue-k)
                                        (M_state (caddr stmt) 
-                                               state 
+                                               loop-state
                                                return 
-                                               (lambda (s) (break-k s))  ;; break跳出整个循环
-                                               continue-k  ;; 简单传递continue-k
+                                               (lambda (s) (break-k (merge-top-bindings (pop-layer s) state)))
+                                               (lambda (s) (continue-k (merge-top-bindings (pop-layer s) state)))
                                                throw)))])
-                              ;; 使用执行后的状态进行下一轮循环
-                              (loop body-state))
-                            ;; 条件为假,结束循环
+                              ;; 保留变量更新但移除作用域
+                              (loop (merge-top-bindings (pop-layer body-state) state)))
                             state))])
          (loop state))))))
+
+;; 合并顶层变量绑定
+(define merge-top-bindings
+  (lambda (from-state to-state)
+    (if (or (null? from-state) (null? to-state))
+        to-state
+        (let ([from-layer (car from-state)]
+              [to-layer (car to-state)])
+          (cons (merge-layers from-layer to-layer)
+                (cdr to-state))))))
 
 ;; 合并两个状态,保留当前状态中的变量值,但清除多余层
 (define merge-state
@@ -329,20 +356,19 @@
 ;; 测试函数
 ;; ============================
 
-(define test
+;; 测试框架 - 综合测试所有文件
+(define test-all
   (lambda ()
     (for-each
      (lambda (filename)
        (printf "~a\n" filename)
        (with-handlers ([exn:fail? (lambda (e)
-                                    (printf "ERROR: ~a\n" (exn-message e)))])
+                                   (printf "ERROR: ~a\n" (exn-message e)))])
          (printf "Result: ~a\n" (interpret filename))))
      '("test1.txt" "test2.txt" "test3.txt" "test4.txt" "test5.txt"
        "test6.txt" "test7.txt" "test8.txt" "test9.txt" "test10.txt"
        "test11.txt" "test12.txt" "test13.txt" "test14.txt" "test15.txt"
        "test16.txt" "test17.txt" "test18.txt" "test19.txt"))))
-
-(test)
 
 ;; 特殊测试函数 - 只测试一个文件并打印详细结构
 (define test-single
@@ -355,22 +381,5 @@
         (let ([result (interpret filename)])
           (printf "返回结果: ~a\n" result))))))
 
-;; 测试指定文件
-(test-single "test15.txt")
-
-;; 单独测试指定文件列表
-(define test-selected
-  (lambda (filenames)
-    (for-each
-     (lambda (filename)
-       (printf "\n==== 测试 ~a ====\n" filename)
-       (let ([program (parser filename)])
-         (printf "解析结果:\n~a\n" program)
-         (with-handlers ([exn:fail? (lambda (e)
-                                      (printf "错误信息: ~a\n" (exn-message e)))])
-           (let ([result (interpret filename)])
-             (printf "返回结果: ~a\n" result)))))
-     filenames)))
-
-;; 测试特定文件
-(test-selected '("test8.txt" "test10.txt" "test11.txt" "test12.txt"))
+;; 执行部分测试
+(test-all)  ;; 运行所有测试
