@@ -3,197 +3,282 @@
 (require "simpleParser.rkt")
 
 ;; ============================
-;; State Operations
+;; 状态管理
 ;; ============================
 
-(define state-lookup
-  (lambda (var state)
-    (match (assq var state)
-      [#f (error "Error: using before declaring" var)]
-      [(cons _ 'uninitialized) (error "Error: using before assigning" var)]
-      [(cons _ val) 
-       (cond
-         [(eq? val 'true) #t]
-         [(eq? val 'false) #f]
-         [else val])])))
+;; 创建新的作用域层
+(define push-layer
+  (lambda (state)
+    (cons '() state)))
 
+;; 移除顶层作用域
+(define pop-layer
+  (lambda (state)
+    (cdr state)))
+
+;; 在当前层声明变量
 (define state-declare
   (lambda (var val state)
-    (if (assq var state)
-        (error "Error: redefining" var)
-        (cons (cons var val) state))))
+    (if (null? state)
+        (error "Error: state is empty")
+        (let ([layer (car state)]
+              [rest (cdr state)])
+          (cond
+            [(assq var layer) (error "Error: redefining" var)]
+            [else (cons (cons (cons var (box val)) layer) rest)])))))
 
+;; 查找变量值
+(define state-lookup
+  (lambda (var state)
+    (cond
+      [(null? state) (error "Error: using before declaring" var)]
+      [else (let ([binding (assq var (car state))])
+              (if binding
+                  (let ([boxed-value (cdr binding)])
+                    (let ([val (unbox boxed-value)])
+                      (if (eq? val 'uninitialized)
+                          (error "Error: using before assigning" var)
+                          val)))
+                  (state-lookup var (cdr state))))])))
+
+;; 更新变量值
 (define state-update
   (lambda (var val state)
-    (match (split-at-var var state)
-      [(list before #f _) (error "Error: using before declaring" var)]
-      [(list before pair after) 
-       (let ([stored-val (cond
-                          [(eq? val #t) 'true]
-                          [(eq? val #f) 'false]
-                          [else val])])
-         (append before (list (cons var stored-val)) after))])))
-
-;; 辅助函数:将状态分割成三部分:目标变量之前、目标变量、之后
-(define split-at-var
-  (lambda (var state)
-    (let loop ([before '()] [rest state])
-      (cond
-        [(null? rest) (list before #f '())]
-        [(eq? var (caar rest)) (list before (car rest) (cdr rest))]
-        [else (loop (append before (list (car rest))) (cdr rest))]))))
+    (cond
+      [(null? state) (error "Error: using before declaring" var)]
+      [else (let ([layer (car state)]
+                  [rest (cdr state)])
+              (let ([binding (assq var layer)])
+                (if binding
+                    (begin
+                      (set-box! (cdr binding) val)
+                      state)
+                    (cons layer (state-update var val rest)))))])))
 
 ;; ============================
-;; Expression Evaluation
+;; 表达式求值
 ;; ============================
-
-(define coerce-to-number
-  (lambda (val)
-    (cond
-      ((number? val) val)
-      ((boolean? val) (if val 1 0))
-      (else (error "Error: Cannot coerce to number" val)))))
-
-(define coerce-to-boolean
-  (lambda (val)
-    (cond
-      ((boolean? val) val)
-      ((number? val) (not (zero? val)))
-      ((eq? val 'true) #t)
-      ((eq? val 'false) #f)
-      (else (error "Error: Cannot coerce to boolean" val)))))
-
-(define operator car)
-(define firstoperand cadr)
-(define secondoperand caddr)
 
 (define M_value
-  (lambda (expr state)
-    (match expr
-      [(? number?) expr]
-      ['true #t]
-      ['false #f]
-      [(? symbol?) (state-lookup expr state)]
-      [(list '! a) (not (coerce-to-boolean (M_value a state)))]
-      [(list op a b) 
-       (let ([val-a (M_value a state)]
-             [val-b (M_value b state)])
-         (case op
-           [(== != < > <= >= || &&) 
-            (evaluate-boolean-op op val-a val-b)]
-           [else (evaluate-numeric-op op val-a val-b)]))]
-      [(list '- a) (- (coerce-to-number (M_value a state)))]
-      [_ (error 'bad-expr "Error: Unknown expression")])))
+  (lambda (expr state return break continue throw)
+    (cond
+      [(number? expr) expr]
+      [(eq? expr 'true) #t]
+      [(eq? expr 'false) #f]
+      [(symbol? expr) (state-lookup expr state)]
+      [(list? expr)
+       (case (car expr)
+         [(!) (not (M_boolean_value (M_value (cadr expr) state return break continue throw)))]
+         [(+ - * / %)
+          (let ([op (car expr)]
+                [v1 (M_value (cadr expr) state return break continue throw)]
+                [v2 (M_value (caddr expr) state return break continue throw)])
+            (case op
+              [(+) (+ v1 v2)]
+              [(-) (- v1 v2)]
+              [(*) (* v1 v2)]
+              [(/) (quotient v1 v2)]
+              [(%) (modulo v1 v2)]))]
+         [(== != < > <= >= || &&)
+          (let ([op (car expr)]
+                [v1 (M_value (cadr expr) state return break continue throw)]
+                [v2 (M_value (caddr expr) state return break continue throw)])
+            (case op
+              [(==) (equal? v1 v2)]
+              [(!=) (not (equal? v1 v2))]
+              [(<) (< v1 v2)]
+              [(>) (> v1 v2)]
+              [(<=) (<= v1 v2)]
+              [(>=) (>= v1 v2)]
+              [(||) (or (M_boolean_value v1) (M_boolean_value v2))]
+              [(&&) (and (M_boolean_value v1) (M_boolean_value v2))]))]
+         [else (error "Unknown operator" (car expr))])]
+      [else (error "Invalid expression" expr)])))
 
-;; 分离布尔运算和数值运算
-(define evaluate-boolean-op
-  (lambda (op a b)
-    (case op
-      [(==) (equal? a b)]
-      [(!=) (not (equal? a b))]
-      [(<) (< (coerce-to-number a) (coerce-to-number b))]
-      [(>) (> (coerce-to-number a) (coerce-to-number b))]
-      [(<=) (<= (coerce-to-number a) (coerce-to-number b))]
-      [(>=) (>= (coerce-to-number a) (coerce-to-number b))]
-      [(||) (or (coerce-to-boolean a) (coerce-to-boolean b))]
-      [(&&) (and (coerce-to-boolean a) (coerce-to-boolean b))])))
-
-(define evaluate-numeric-op
-  (lambda (op a b)
-    (case op
-      [(+) (+ (coerce-to-number a) (coerce-to-number b))]
-      [(-) (- (coerce-to-number a) (coerce-to-number b))]
-      [(*) (* (coerce-to-number a) (coerce-to-number b))]
-      [(/) (if (zero? (coerce-to-number b))
-               (error "Division by zero")
-               (quotient (coerce-to-number a) (coerce-to-number b)))]
-      [(%) (modulo (coerce-to-number a) (coerce-to-number b))])))
-
-;; ============================
-;; Statement Execution
-;; ============================
-
-(define M_statement
-  (lambda (stmt state)
-    (match stmt
-      [(list 'var var) 
-       (cons (state-declare var 'uninitialized state) #f)]
-      
-      [(list 'var var expr) 
-       (let ([val (M_value expr state)])
-         (cons (state-declare var val state) #f))]
-      
-      [(list '= var expr)
-       (let ([val (M_value expr state)])
-         (cons (state-update var val state) #f))]
-      
-      [(list 'return expr)
-       (let ([val (M_value expr state)])
-         (cons (cons (cons 'return-flag #t) state) val))]
-      
-      [(list 'if cond then-stmt)
-       (let ([cond-val (coerce-to-boolean (M_value cond state))])
-         (if cond-val
-             (M_statement then-stmt state)
-             (cons state #f)))]
-      
-      [(list 'if cond then-stmt else-stmt)
-       (let ([cond-val (coerce-to-boolean (M_value cond state))])
-         (if cond-val
-             (M_statement then-stmt state)
-             (M_statement else-stmt state)))]
-      
-      [(list 'while cond body)
-       (if (coerce-to-boolean (M_value cond state))
-           (match (M_statement body state)
-             [(cons new-state #f) (M_statement stmt new-state)]
-             [result result])
-           (cons state #f))]
-      
-      [(cons 'begin stmts)
-       (execute-statements stmts state)]
-      
-      [_ (error 'bad-stmt "Error: Unknown statement type")])))
-
-;; 辅助函数:执行语句序列
-(define execute-statements
-  (lambda (stmts state)
-    (match stmts
-      ['() (cons state #f)]
-      [(cons stmt rest)
-       (match (M_statement stmt state)
-         [(cons new-state #f) (execute-statements rest new-state)]
-         [result result])])))
+;; 转换为布尔值
+(define M_boolean_value
+  (lambda (v)
+    (cond
+      [(boolean? v) v]
+      [(number? v) (not (zero? v))]
+      [else (error "Cannot convert to boolean" v)])))
 
 ;; ============================
-;; Program Execution
+;; 语句执行
+;; ============================
+
+;; 执行语句列表
+(define M_state_list
+  (lambda (stmts state return break continue throw)
+    (if (null? stmts)
+        state
+        (M_state_list (cdr stmts)
+                      (M_state (car stmts) state return break continue throw)
+                      return break continue throw))))
+
+;; 主语句执行函数
+(define M_state
+  (lambda (stmt state return break continue throw)
+    (cond
+      [(null? stmt) state]
+      [(eq? (car stmt) 'begin)
+       (let* ([new-state (push-layer state)]
+              [result (M_state_list (cdr stmt) new-state return break continue throw)])
+         (pop-layer result))]
+      [(list? stmt)
+       (case (car stmt)
+         [(var)
+          (if (null? (cddr stmt))
+              (state-declare (cadr stmt) 'uninitialized state)
+              (state-declare (cadr stmt) (M_value (caddr stmt) state return break continue throw) state))]
+         [(=)
+          (state-update (cadr stmt) (M_value (caddr stmt) state return break continue throw) state)]
+         [(return)
+          (return (M_value (cadr stmt) state return break continue throw))]
+         [(if)
+          (if (M_boolean_value (M_value (cadr stmt) state return break continue throw))
+              (M_state (caddr stmt) state return break continue throw)
+              (if (null? (cdddr stmt))
+                  state
+                  (M_state (cadddr stmt) state return break continue throw)))]
+         [(while)
+          (M_state_while stmt state return break continue throw)]
+         [(break)
+          (break state)]
+         [(continue)
+          (continue state)]
+         [(throw)
+          (throw (M_value (cadr stmt) state return break continue throw) state)]
+         [(try)
+          (M_state_try stmt state return break continue throw)]
+         [else (error "Unknown statement type" stmt)])]
+      [else (error "Invalid statement" stmt)])))
+
+;; 辅助函数:查找try-catch-finally子句
+(define find-clause
+  (lambda (type clauses)
+    (cond
+      [(null? clauses) #f]
+      [(and (pair? (car clauses)) (eq? (caar clauses) type)) (car clauses)]
+      [else (find-clause type (cdr clauses))])))
+
+;; 处理try-catch-finally语句
+(define M_state_try
+  (lambda (stmt state return break continue throw)
+    (let ([try-body (cadr stmt)]
+          [clauses (cddr stmt)])
+      (let ([catch-clause (find-clause 'catch clauses)]
+            [finally-clause (find-clause 'finally clauses)])
+        
+        ;; 标记异常的辅助函数
+        (define (mark-as-exception val st)
+          (cons 'exception (cons val st)))
+        
+        ;; 检查是否是异常
+        (define (exception? obj)
+          (and (pair? obj) (eq? (car obj) 'exception)))
+        
+        ;; 获取异常值和状态
+        (define (exception-val-state exn)
+          (values (cadr exn) (cddr exn)))
+        
+        ;; 执行finally块
+        (define (execute-finally st)
+          (if finally-clause
+              (let ([finally-stmts (cadr finally-clause)])
+                (foldl (lambda (s st)
+                         (M_state s st return break continue throw))
+                       st
+                       finally-stmts))
+              st))
+        
+        ;; try块执行
+        (let ([try-result
+               (call/cc
+                (lambda (return-from-try)
+                  (call/cc
+                   (lambda (throw-from-try)
+                     (let ([local-throw 
+                            (lambda (val st)
+                              (throw-from-try (mark-as-exception val st)))])
+                       
+                       ;; 执行try块中的每个语句
+                       (let ([after-try 
+                              (foldl 
+                               (lambda (s st)
+                                 (M_state s st return break continue local-throw))
+                               state
+                               try-body)])
+                         
+                         ;; try块正常执行完毕,执行finally然后返回
+                         (let ([final-state (execute-finally after-try)])
+                           (return-from-try final-state))))))))])
+          
+          ;; 检查是否有异常
+          (if (exception? try-result)
+              ;; 处理异常情况
+              (let-values ([(exception-val exception-state) (exception-val-state try-result)])
+                (if catch-clause
+                    ;; 执行catch块
+                    (let* ([catch-var (cadr catch-clause)]
+                           [catch-body (caddr catch-clause)]
+                           [new-layer (push-layer exception-state)]
+                           [with-exception (state-declare catch-var exception-val new-layer)]
+                           [after-catch 
+                            (foldl 
+                             (lambda (s st)
+                               (M_state s st return break continue throw))
+                             with-exception
+                             catch-body)]
+                           [removed-layer (pop-layer after-catch)]
+                           [final-state (execute-finally removed-layer)])
+                      final-state)
+                    ;; 无catch块 - 执行finally后继续抛出异常
+                    (let ([final-state (execute-finally exception-state)])
+                      (throw exception-val final-state))))
+              
+              ;; 正常情况 - 返回状态
+              try-result))))))
+
+;; 循环语句 - 改进break/continue的处理
+(define M_state_while
+  (lambda (stmt state return break continue throw)
+    (call/cc
+     (lambda (break-k)
+       (letrec ([loop (lambda (state)
+                        (if (M_boolean_value (M_value (cadr stmt) state return break-k continue throw))
+                            (call/cc
+                             (lambda (continue-k)
+                               (let ([body-state (M_state (caddr stmt) 
+                                                         state 
+                                                         return 
+                                                         (lambda (s) (break-k s))  ;; 传递状态给外层break
+                                                         (lambda (s) (continue-k s))
+                                                         throw)])
+                                 (loop body-state))))
+                            state))])
+         (loop state))))))
+
+;; ============================
+;; 解释器入口
 ;; ============================
 
 (define interpret
   (lambda (filename)
-    (let* ([result (M_state (parser filename) '())]
-           [state (car result)]
-           [return-val (cdr result)])
-      (if (and (pair? result) (eq? (cdr result) #f) (not (assq 'return-flag state)))
-          ;; 程序没有return语句的情况
-          0
-          ;; 程序有return语句的情况
-          (cond
-            [(eq? return-val #t) 'true]
-            [(eq? return-val #f) 'false]
-            [else return-val])))))
-
-(define M_state execute-statements)
+    (call/cc
+     (lambda (return)
+       (let ([program (parser filename)])
+         ;; 程序是一个语句列表,所以我们直接调用M_state_list
+         (M_state_list program 
+                      (list '()) ; 初始空状态
+                      return
+                      (lambda (s) (error "Error: break outside loop"))
+                      (lambda (s) (error "Error: continue outside loop"))
+                      (lambda (v s) (error "Error: uncaught exception" v))))))))
 
 ;; ============================
-;; Testing
+;; 测试函数
 ;; ============================
-
-(define test-files
-  '("test1.txt" "test2.txt" "test3.txt" "test4.txt" "test5.txt"
-    "test6.txt" "test7.txt" "test8.txt" "test9.txt" "test10.txt"
-    "test11.txt" "test12.txt" "test13.txt" "test14.txt" "test15.txt"
-    "test16.txt" "test17.txt" "test18.txt" "test19.txt" "test20.txt"))
 
 (define test
   (lambda ()
@@ -201,9 +286,25 @@
      (lambda (filename)
        (printf "~a\n" filename)
        (with-handlers ([exn:fail? (lambda (e)
-                                   (printf "~a\n" (exn-message e)))])
+                                    (printf "ERROR: ~a\n" (exn-message e)))])
          (printf "Result: ~a\n" (interpret filename))))
-     test-files)))
+     '("test1.txt" "test2.txt" "test3.txt" "test4.txt" "test5.txt"
+       "test6.txt" "test7.txt" "test8.txt" "test9.txt" "test10.txt"
+       "test11.txt" "test12.txt" "test13.txt" "test14.txt" "test15.txt"
+       "test16.txt" "test17.txt" "test18.txt" "test19.txt"))))
 
 (test)
 
+;; 特殊测试函数 - 只测试一个文件并打印详细结构
+(define test-single
+  (lambda (filename)
+    (printf "测试文件: ~a\n" filename)
+    (let ([program (parser filename)])
+      (printf "解析结果:\n~a\n" program)
+      (with-handlers ([exn:fail? (lambda (e)
+                                   (printf "错误信息: ~a\n" (exn-message e)))])
+        (let ([result (interpret filename)])
+          (printf "返回结果: ~a\n" result))))))
+
+;; 测试指定文件
+(test-single "test15.txt")
