@@ -368,7 +368,11 @@
      '("test1.txt" "test2.txt" "test3.txt" "test4.txt" "test5.txt"
        "test6.txt" "test7.txt" "test8.txt" "test9.txt" "test10.txt"
        "test11.txt" "test12.txt" "test13.txt" "test14.txt" "test15.txt"
-       "test16.txt" "test17.txt" "test18.txt" "test19.txt"))))
+       "test16.txt" "test17.txt" "test18.txt" "test19.txt" "test20.txt"
+       "2test1.txt" "2test2.txt" "2test3.txt" "2test4.txt" "2test5.txt"
+       "2test6.txt" "2test7.txt" "2test8.txt" "2test9.txt" "2test10.txt"
+       "2test11.txt" "2test12.txt" "2test13.txt" "2test14.txt" "2test15.txt"
+       "2test16.txt" "2test17.txt" "2test18.txt" "2test19.txt" ))))
 
 ;; 特殊测试函数 - 只测试一个文件并打印详细结构
 (define test-single
