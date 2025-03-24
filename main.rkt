@@ -82,13 +82,24 @@
       [(list? expr)
        (case (car expr)
          [(!) (not (M_boolean_value (M_value (cadr expr) state return break continue throw)))]
-         [(+ - * / %)
+         [(- +) 
+          ;; 检查是否为一元负号/正号
+          (if (null? (cddr expr))
+              (let ([v (M_value (cadr expr) state return break continue throw)])
+                (case (car expr)
+                  [(+) v]
+                  [(-) (- v)]))
+              ;; 否则是二元操作符
+              (let ([v1 (M_value (cadr expr) state return break continue throw)]
+                    [v2 (M_value (caddr expr) state return break continue throw)])
+                (case (car expr)
+                  [(+) (+ v1 v2)]
+                  [(-) (- v1 v2)])))]
+         [(* / %)
           (let ([op (car expr)]
                 [v1 (M_value (cadr expr) state return break continue throw)]
                 [v2 (M_value (caddr expr) state return break continue throw)])
             (case op
-              [(+) (+ v1 v2)]
-              [(-) (- v1 v2)]
               [(*) (* v1 v2)]
               [(/) (quotient v1 v2)]
               [(%) (modulo v1 v2)]))]
@@ -364,7 +375,13 @@
        (printf "~a\n" filename)
        (with-handlers ([exn:fail? (lambda (e)
                                    (printf "ERROR: ~a\n" (exn-message e)))])
-         (printf "Result: ~a\n" (interpret filename))))
+         (let ([result (interpret filename)])
+           ;; 转换布尔值为true/false
+           (printf "Result: ~a\n" 
+                   (cond
+                     [(eq? result #t) "true"]
+                     [(eq? result #f) "false"]
+                     [else result])))))
      '("test1.txt" "test2.txt" "test3.txt" "test4.txt" "test5.txt"
        "test6.txt" "test7.txt" "test8.txt" "test9.txt" "test10.txt"
        "test11.txt" "test12.txt" "test13.txt" "test14.txt" "test15.txt"
