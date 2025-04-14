@@ -258,7 +258,7 @@
   (lambda (stmts state return break continue throw)
     (if (null? stmts)
         0
-        ;; 首先提升所有函数声明
+        ;; 首先声明所有函数（提升效果）
         (let ((hoisted-state 
               (foldl (lambda (stmt st)
                        (if (and (list? stmt) 
@@ -284,8 +284,9 @@
   (lambda (stmts state return break continue throw)
     (let ((block-env (push-layer state)))
       (let ((result (M_state_list stmts block-env return break continue throw)))
-        (pop-layer block-env)  ; remove the extra layer
-        result))))
+        (if (list? result)
+            (pop-layer result)  ; 如果结果是状态，弹出层
+            result)))))  ; 如果结果是值，直接返回
 
 ;; M_state: evaluate a single statement.
 ;; If stmt does not match any special form, treat it as an expression statement.
@@ -367,57 +368,39 @@
 
 (define M_state_try
   (lambda (stmt state return break continue throw)
-    (let ((try-body (firstoperand stmt))
-          (catch-clause (find-clause 'catch (drop-first-two stmt)))
-          (finally-clause (find-clause 'finally (drop-first-two stmt))))
+    (let ((try-body (car (cdr stmt)))  ; 直接获取try块的内容
+          (catch-clause (find-clause 'catch (cdr (cdr stmt))))
+          (finally-clause (find-clause 'finally (cdr (cdr stmt)))))
       (define (execute-finally st)
         (if finally-clause
-            (let ((finally-stmts (if (and (list? (firstoperand finally-clause))
-                                         (not (null? (firstoperand finally-clause))))
-                                    (firstoperand finally-clause)
-                                    '())))
-              (foldl (lambda (s st) (M_state s st return break continue throw))
-                     st
-                     finally-stmts))
+            (let ((finally-body (car (cdr finally-clause))))  ; 获取finally块的内容
+              (M_state_block finally-body st return break continue throw))
             st))
       (call/cc (lambda (throw-k)
                  (let ((try-result
-                        (let ((try-stmts (if (and (list? try-body) 
-                                                (not (null? try-body)) 
-                                                (list? (firstoperand try-body))
-                                                (not (null? (firstoperand try-body))))
-                                           (firstoperand try-body)
-                                           (list try-body))))
-                          (call/cc (lambda (normal-k)
-                                     (foldl (lambda (s st)
-                                              (M_state s st 
-                                                      normal-k
-                                                      break 
-                                                      continue
-                                                      (lambda (val st)
-                                                        (throw-k (cons 'exception (cons val st))))))
-                                            state
-                                            try-stmts)
-                                     (normal-k state))))))
+                        (call/cc 
+                         (lambda (normal-k)
+                           (M_state_block
+                            try-body
+                            state
+                            normal-k
+                            break
+                            continue
+                            (lambda (val st)
+                              (throw-k (cons 'exception (cons val st)))))
+                           (normal-k state)))))
                    (let ((base-result
-                          (if (and (list? try-result) 
-                                  (not (null? try-result)) 
+                          (if (and (pair? try-result) 
                                   (eq? (car try-result) 'exception))
                               (if catch-clause
-                                  (let* ((catch-var (firstoperand (car catch-clause)))
-                                         (catch-body (if (and (list? (secondoperand catch-clause))
-                                                             (not (null? (secondoperand catch-clause))))
-                                                        (secondoperand catch-clause)
-                                                        (list (secondoperand catch-clause))))
-                                         (exception-val (cadr try-result))
-                                         (catch-state (cddr try-result))
+                                  (let* ((catch-var (car (cdr (car catch-clause))))
+                                         (catch-body (car (cdr (cdr (car catch-clause)))))
+                                         (exception-val (car (cdr try-result)))
+                                         (catch-state (cdr (cdr try-result)))
                                          (catch-env (push-layer catch-state))
                                          (env-with-exc (state-declare catch-var exception-val catch-env)))
-                                    (foldl (lambda (s st)
-                                             (M_state s st return break continue throw))
-                                           env-with-exc
-                                           catch-body))
-                                  (throw (cadr try-result) (cddr try-result)))
+                                    (M_state_block catch-body env-with-exc return break continue throw))
+                                  (throw (car (cdr try-result)) (cdr (cdr try-result))))
                               try-result)))
                      (execute-finally base-result))))))))
 
