@@ -92,7 +92,7 @@
            (let ()
              (define val (unbox (operands binding)))
              (if (eq? val 'uninitialized)
-                 0  ; 返回默认值0而不是报错
+                 0  ; Return default value 0 instead of reporting an error
                  val))
            (state-lookup var (operands state)))])))
 
@@ -121,13 +121,13 @@
           (let ()
             (define binding (assq var (operator layers)))
             (if binding
-                (cons binding layers)  ; 返回绑定和层
+                (cons binding layers)  ; Return binding and layer
                 (find-var-binding (operands layers))))))
     
     (define result (find-var-binding state))
     (define binding (operator result))
     
-    ;; 更新绑定并返回状态
+    ;; Update binding and return state
     (set-box! (operands binding) val)
     state))
 
@@ -140,8 +140,8 @@
     (cond
       [(boolean? v) v]
       [(number? v) (not (zero? v))]
-      [(and (list? v) (not (null? v))) #t]  ; 非空列表视为true
-      [(null? v) #f]                       ; 空列表视为false
+      [(and (list? v) (not (null? v))) #t]  ; Non-empty lists are considered true
+      [(null? v) #f]                       ; Empty lists are considered false
       [else (error "Cannot convert to boolean" v)])))
 
 (define M_value
@@ -215,7 +215,7 @@
 (define bind-params
   (lambda (env params args caller-state return break continue throw)
     (cond
-      ;; 基本情况：参数列表为空
+      ;; basic case: parameter list is empty
       [(and (null? params) (null? args)) env]
       [(null? params) 
        (if (null? args)
@@ -224,14 +224,14 @@
       [(null? args) 
        (error "Arity mismatch in function call: missing arguments")]
       
-      ;; 递归情况：绑定当前参数并继续
+      ;; recursive case: bind current parameter and continue
       [else
        (define param (operator params))
        (define arg (operator args))
        (define rest-params (operands params))
        (define rest-args (operands args))
        
-       ;; 处理引用参数或普通参数
+       ;; handle reference parameter or normal parameter
        (if (and (list? param) (eq? (operator param) 'ref))
            (if (symbol? arg)
                (bind-params (state-declare (firstoperand param) 
@@ -264,7 +264,7 @@
     (define def-env (closure-env closure))
     (define fname (closure-fname closure))
     
-    ;; 添加函数自身到环境以支持递归，然后绑定参数
+    ;; add function itself to environment to support recursion, then bind parameters
     (define fun-env-with-params 
       (bind-params 
        (if fname
@@ -278,7 +278,7 @@
        continue
        throw))
     
-    ;; 执行函数体并返回结果
+    ;; execute function body and return result
     (call/cc 
      (lambda (ret)
        (M_state_list 
@@ -299,7 +299,7 @@
     (cond
       [(null? stmts) state]
       [else
-       ;; 首先提升所有函数定义
+       ;; first lift all function definitions
        (define (hoist-functions stmt st)
          (if (and (list? stmt) 
                   (not (null? stmt)) 
@@ -315,7 +315,7 @@
        
        (define hoisted-state (foldl hoist-functions state stmts))
        
-       ;; 然后正常求值所有语句
+       ;; then evaluate all statements normally
        (define (evaluate-statements remaining-stmts current-state)
          (if (null? (operands remaining-stmts))
              (M_state (operator remaining-stmts) current-state return break continue throw)
@@ -336,8 +336,8 @@
         state
         (let ((result (M_state_list stmts (push-layer state) return break continue throw)))
           (if (list? result)
-              (pop-layer result)  ; 如果结果是状态，弹出层
-              result)))))  ; 如果结果是值，直接返回
+              (pop-layer result)  ; if result is state, pop layer
+              result)))))  ; if result is value, return directly
 
 ;; M_state: evaluate a single statement.
 ;; If stmt does not match any special form, treat it as an expression statement.
@@ -441,9 +441,11 @@
                          (firstoperand catch-clause)))
     (define catch-env (push-layer exception-state))
     (define catch-env-with-e (state-declare 'e exception-val catch-env))
+    ;; If variable name is not 'e', declare the specified variable
     (define catch-env-final (if (eq? catch-var 'e)
                               catch-env-with-e
                               (state-declare catch-var exception-val catch-env-with-e)))
+    ;; Execute catch block
     (M_state_block catch-body catch-env-final return break continue throw)))
 
 (define process-finally
@@ -479,7 +481,7 @@
     
     (define (handle-try-result try-result)
       (cond
-        ;; 处理异常
+        ;; Handle exception
         [(and (pair? try-result) (eq? (operator try-result) 'exception))
          (define exception-val (firstoperand try-result))
          (define exception-state (drop-first-two try-result))
@@ -491,28 +493,28 @@
                    (throw exception-val exception-state))
                  (throw exception-val exception-state)))]
         
-        ;; 处理return
+        ;; Handle return
         [(and (pair? try-result) (eq? (operator try-result) 'return))
          (define return-val (operands try-result))
          (execute-finally state)
          (return return-val)]
         
-        ;; 处理break
+        ;; Handle break
         [(and (pair? try-result) (eq? (operator try-result) 'break))
          (define break-state (operands try-result))
          (execute-finally break-state)
          (break break-state)]
         
-        ;; 处理continue
+        ;; Handle continue
         [(and (pair? try-result) (eq? (operator try-result) 'continue))
          (define continue-state (operands try-result))
          (execute-finally continue-state)
          (continue continue-state)]
         
-        ;; 正常执行完try块
+        ;; Normal completion of try block
         [else (execute-finally try-result)]))
     
-    ;; 执行try块并处理结果
+    ;; Execute try block and handle results
     (handle-try-result
      (call/cc 
       (lambda (throw-k)
@@ -565,12 +567,12 @@
             (lambda (return)
               (define program (parser filename))
               (define global-state (make-state))
-              ;; 执行整个程序
+              ;; execute the whole program
               (define final-state (M_state_list program global-state return
                                               (lambda (s) (error "Error: break outside loop"))
                                               (lambda (s) (error "Error: continue outside loop"))
                                               (lambda (v s) (error "Error: uncaught exception" v))))
-              ;; 查找并调用main函数
+              ;; find and call main function
               (define main-closure (state-lookup 'main final-state))
               (if (closure? main-closure)
                   (call-function main-closure '() final-state return
@@ -607,12 +609,12 @@
          (lambda (return)
            (define program (parser filename))
            (define global-state (make-state))
-           ;; 执行整个程序
+           ;; execute the whole program
            (define final-state (M_state_list program global-state return
                                           (lambda (s) (error "Error: break outside loop"))
                                           (lambda (s) (error "Error: continue outside loop"))
                                           (lambda (v s) (error "Error: uncaught exception" v))))
-           ;; 查找并调用main函数
+           ;; find and call main function
            (define main-closure (state-lookup 'main final-state))
            (if (closure? main-closure)
                (call-function main-closure '() final-state return
@@ -626,10 +628,10 @@
                 [(eq? result #f) "false"]
                 [else result])))))
 
-;; 运行所有测试
+;; run all tests
 (test-all)
 
-;; 或者运行特定测试（取消注释以测试特定文件）
-(test-specific "3test19.txt")  ;; 测试19-异常处理
-(test-specific "3test20.txt")  ;; 测试20-嵌套异常处理
-(test-specific "3test16.txt")  ;; 测试16-函数嵌套函数嵌套函数
+;; or run specific test (uncomment to test specific file)
+;;(test-specific "3test19.txt")  ;; test 19-exception handling
+;;(test-specific "3test20.txt")  ;; test 20-nested exception handling
+;;(test-specific "3test16.txt")  ;; test 16-function nested function nested function
