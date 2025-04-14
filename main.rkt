@@ -20,19 +20,22 @@
 (define firstoperand cadr)
 (define secondoperand caddr)
 (define drop-first-two cddr)
+(define operands cdr)
+(define operand1 cadr)
+(define operand2 caddr)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Closure Data Structure & Helper Functions
 ;;
 ;; A function closure is represented as:
-;;   (closure <raw-params> <body> <def-env>)
+;;   (closure <raw-params> <body> <def-env> <fname>)
 ;; Parameters with a preceding ampersand (&) are processed into (ref x);
 ;; all other parameters pass through unchanged.
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (define make-closure
-  (lambda (params body env)
-    (list 'closure params body env)))
+  (lambda (params body env fname)
+    (list 'closure params body env fname)))
 
 (define closure?
   (lambda (v)
@@ -41,6 +44,7 @@
 (define closure-params (lambda (cl) (cadr cl)))
 (define closure-body   (lambda (cl) (caddr cl)))
 (define closure-env    (lambda (cl) (cadddr cl)))
+(define closure-fname  (lambda (cl) (if (< (length cl) 5) #f (list-ref cl 4))))
 
 (define process-params
   (lambda (params)
@@ -74,24 +78,20 @@
     (if (null? state)
         (error "Error: state is empty")
         ((lambda (layer rest)
-           (if (and (assq var layer) (not (closure? val)))
-               (error "Error: redefining" var)
-               ;; 如果是函数重定义，覆盖之前的定义
-               (if (assq var layer)
-                   (cons (cons (cons var (box val)) 
-                               (remove (assq var layer) layer)) 
-                         rest)
-                   (cons (cons (cons var (box val)) layer) rest))))
+           ;; 总是允许覆盖当前层中的变量定义
+           ;; 这对于函数参数和嵌套函数非常重要
+           (cons (cons (cons var (box val)) 
+                      (if (assq var layer) 
+                          (remove (assq var layer) layer)
+                          layer))
+                 rest))
          (car state) (cdr state)))))
 
 (define state-lookup
   (lambda (var state)
     (cond
       [(null? state) 
-       ;; 对于特殊的全局变量，如x，返回默认值而不是报错
-       (if (memq var '(x base result))
-           0
-           (error "Error: using before declaring" var))]
+       (error "Error: using before declaring" var)]
       [else
        (let ((binding (assq var (car state))))
          (if binding
@@ -177,8 +177,12 @@
           ((lambda (op v1 v2)
              (case op
                [(*) (* v1 v2)]
-               [(/) (quotient v1 v2)]
-               [(%) (modulo v1 v2)]))
+               [(/) (if (zero? v2)
+                        (error "Division by zero")
+                        (quotient v1 v2))]
+               [(%) (if (zero? v2)
+                        (error "Modulo by zero")
+                        (modulo v1 v2))]))
            (operator expr)
            (M_value (firstoperand expr) state return break continue throw)
            (M_value (secondoperand expr) state return break continue throw))]
@@ -197,10 +201,12 @@
          [(funcall)
           (let* ((fname (firstoperand expr))
                  (actuals (drop-first-two expr))
-                 (closure (state-lookup fname state)))
-            (if (not (closure? closure))
+                 (fval (if (symbol? fname)
+                          (state-lookup fname state)
+                          (M_value fname state return break continue throw))))
+            (if (not (closure? fval))
                 (error "Attempted to call a non-function:" fname)
-                (let ((result (call-function closure actuals state return break continue throw)))
+                (let ((result (call-function fval actuals state return break continue throw)))
                   result)))]
          [else (error "Unknown operator in M_value:" (operator expr))])]
       [else (error "Invalid expression" expr)])))
@@ -240,14 +246,20 @@
            (params (process-params raw-params))
            (body (closure-body closure))
            (def-env (closure-env closure))
-           (fun-env (push-layer def-env))
+           (fname (closure-fname closure))
+           ;; 先添加函数自身到环境中以支持递归
+           (fun-env (if fname
+                        (state-declare fname closure def-env)
+                        def-env))
+           ;; 然后绑定参数
            (env-with-params (bind-params fun-env params args caller-state return break continue throw)))
-      (call/cc (lambda (ret)
-                 (let ((result (M_state_list body env-with-params ret 
-                                            (lambda (s) (break s))  ; 传递正确的break处理器
-                                            (lambda (s) (continue s))  ; 传递正确的continue处理器
-                                            throw)))
-                   (ret result)))))))
+      (call/cc 
+       (lambda (ret)
+         (let ((result (M_state_list body env-with-params ret 
+                                   (lambda (s) (break s))
+                                   (lambda (s) (continue s))
+                                   throw)))
+           result))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Statement Execution (M_state)
@@ -257,36 +269,38 @@
 (define M_state_list
   (lambda (stmts state return break continue throw)
     (if (null? stmts)
-        0
-        ;; 首先声明所有函数（提升效果）
+        state  ;; 返回当前状态而不是0
+        ;; 首先提升所有函数定义
         (let ((hoisted-state 
-              (foldl (lambda (stmt st)
-                       (if (and (list? stmt) 
-                               (not (null? stmt)) 
-                               (eq? (car stmt) 'function))
-                           (let* ((fname (cadr stmt))
-                                 (raw-params (caddr stmt))
-                                 (body (cadddr stmt))
-                                 (closure (make-closure raw-params body st)))
-                             (state-declare fname closure st))
-                           st))
-                     state
-                     stmts)))
+               (foldl (lambda (stmt st)
+                        (if (and (list? stmt) 
+                                (not (null? stmt)) 
+                                (eq? (car stmt) 'function))
+                            (let* ((fname (cadr stmt))
+                                  (raw-params (caddr stmt))
+                                  (body (cadddr stmt))
+                                  (closure (make-closure raw-params body st fname)))
+                              (state-declare fname closure st))
+                            st))
+                      state
+                      stmts)))
           ;; 然后正常求值所有语句
-          (let loop ((lst stmts) (curr hoisted-state))
+          (let loop ((lst stmts) (st hoisted-state))
             (if (null? (cdr lst))
-                (M_state (car lst) curr return break continue throw)
+                (M_state (car lst) st return break continue throw)
                 (loop (cdr lst)
-                      (M_state (car lst) curr return break continue throw))))))))
+                      (M_state (car lst) st return break continue throw))))))))
 
 ;; M_state_block: evaluate a block by pushing a new layer, evaluating the statements, then popping the layer.
 (define M_state_block
   (lambda (stmts state return break continue throw)
-    (let ((block-env (push-layer state)))
-      (let ((result (M_state_list stmts block-env return break continue throw)))
-        (if (list? result)
-            (pop-layer result)  ; 如果结果是状态，弹出层
-            result)))))  ; 如果结果是值，直接返回
+    (if (null? stmts)
+        state
+        (let ((block-env (push-layer state)))
+          (let ((result (M_state_list stmts block-env return break continue throw)))
+            (if (list? result)
+                (pop-layer result)  ; 如果结果是状态，弹出层
+                result))))))  ; 如果结果是值，直接返回
 
 ;; M_state: evaluate a single statement.
 ;; If stmt does not match any special form, treat it as an expression statement.
@@ -304,7 +318,8 @@
           (let* ((fname (cadr stmt))
                  (raw-params (caddr stmt))
                  (body (cadddr stmt))
-                 (closure (make-closure raw-params body state)))
+                 ;; 直接使用当前环境，不添加新层，同时存储函数名
+                 (closure (make-closure raw-params body state fname)))
             (state-declare fname closure state))]
          [(var)
           (if (null? (drop-first-two stmt))
@@ -313,35 +328,42 @@
                              (M_value (secondoperand stmt) state return break continue throw)
                              state))]
          [(=)
-          (state-update (firstoperand stmt)
-                        (M_value (secondoperand stmt) state return break continue throw)
-                        state)]
+          (let* ((var (firstoperand stmt))
+                 (val (M_value (secondoperand stmt) state return break continue throw)))
+            (if (not (symbol? var))
+                (error "Left side of assignment must be a variable")
+                (state-update var val state)))]
          [(return)
           (return (M_value (firstoperand stmt) state return break continue throw))]
          [(if)
           (let ((len (length stmt)))
             (if (M_boolean_value (M_value (firstoperand stmt) state return break continue throw))
-                (M_state_block (secondoperand stmt) state return break continue throw)
+                (if (list? (secondoperand stmt))
+                    (M_state (secondoperand stmt) state return break continue throw)
+                    (M_state_block (list (secondoperand stmt)) state return break continue throw))
                 (if (= len 3)
                     state
-                    (M_state_block (cadddr stmt) state return break continue throw))))]
+                    (if (list? (cadddr stmt))
+                        (M_state (cadddr stmt) state return break continue throw)
+                        (M_state_block (list (cadddr stmt)) state return break continue throw)))))]
          [(while)
           (call/cc
            (lambda (break-k)
-             (let loop ((st state) (iter-count 0))
-               (if (> iter-count 1000000)  ; 添加最大迭代次数限制
-                   (error "Maximum iteration count (1,000,000) exceeded. Possible infinite loop detected.")
-                   (if (M_boolean_value (M_value (firstoperand stmt) st return break-k continue throw))
-                       (call/cc
-                        (lambda (continue-k)
-                          (let ((body-state (M_state (secondoperand stmt) 
-                                                    st 
-                                                    return 
-                                                    break-k 
-                                                    continue-k 
-                                                    throw)))
-                            (loop (merge-top-bindings body-state st) (add1 iter-count)))))
-                       st)))))]
+             (letrec ((loop (lambda (st iter-count)
+                              (if (> iter-count 100000)  ; 限制迭代次数
+                                  (error "Maximum iteration count (100,000) exceeded. Possible infinite loop detected.")
+                                  (if (M_boolean_value (M_value (firstoperand stmt) st return break-k continue throw))
+                                      (call/cc
+                                       (lambda (continue-k)
+                                         (let ((body-state (M_state (secondoperand stmt) 
+                                                                   st 
+                                                                   return 
+                                                                   break-k 
+                                                                   continue-k 
+                                                                   throw)))
+                                           (loop (merge-top-bindings body-state st) (add1 iter-count)))))
+                                      st)))))
+               (loop state 0))))]
          [(break) (break state)]
          [(continue) (continue state)]
          [(throw)
@@ -362,47 +384,122 @@
   (lambda (type clauses)
     (cond
       [(null? clauses) #f]
-      [(and (pair? (car clauses)) (eq? (caar clauses) type))
+      [(and (list? (car clauses)) 
+            (not (null? (car clauses)))
+            (eq? (operator (car clauses)) type))
        (car clauses)]
       [else (find-clause type (cdr clauses))])))
 
 (define M_state_try
   (lambda (stmt state return break continue throw)
-    (let ((try-body (car (cdr stmt)))  ; 直接获取try块的内容
-          (catch-clause (find-clause 'catch (cdr (cdr stmt))))
-          (finally-clause (find-clause 'finally (cdr (cdr stmt)))))
-      (define (execute-finally st)
-        (if finally-clause
-            (let ((finally-body (car (cdr finally-clause))))  ; 获取finally块的内容
-              (M_state_block finally-body st return break continue throw))
-            st))
-      (call/cc (lambda (throw-k)
-                 (let ((try-result
-                        (call/cc 
-                         (lambda (normal-k)
-                           (M_state_block
-                            try-body
-                            state
-                            normal-k
-                            break
-                            continue
-                            (lambda (val st)
-                              (throw-k (cons 'exception (cons val st)))))
-                           (normal-k state)))))
-                   (let ((base-result
-                          (if (and (pair? try-result) 
-                                  (eq? (car try-result) 'exception))
-                              (if catch-clause
-                                  (let* ((catch-var (car (cdr (car catch-clause))))
-                                         (catch-body (car (cdr (cdr (car catch-clause)))))
-                                         (exception-val (car (cdr try-result)))
-                                         (catch-state (cdr (cdr try-result)))
-                                         (catch-env (push-layer catch-state))
-                                         (env-with-exc (state-declare catch-var exception-val catch-env)))
-                                    (M_state_block catch-body env-with-exc return break continue throw))
-                                  (throw (car (cdr try-result)) (cdr (cdr try-result))))
-                              try-result)))
-                     (execute-finally base-result))))))))
+    (let* ((try-body (cadr stmt))
+           (rest-clauses (cddr stmt))
+           (catch-clause (find-clause 'catch rest-clauses))
+           (finally-clause (find-clause 'finally rest-clauses)))
+      
+      ;; 先执行try块
+      (let ((try-result 
+             (call/cc 
+              (lambda (throw-k)
+                (M_state_block
+                 try-body
+                 state
+                 (lambda (v) (throw-k (list 'return v)))  ;; 捕获return
+                 (lambda (s) (throw-k (list 'break s)))   ;; 捕获break
+                 (lambda (s) (throw-k (list 'continue s))) ;; 捕获continue
+                 (lambda (val st)                         ;; 捕获异常
+                   (throw-k (list 'exception val st))))))))
+        
+        ;; 根据try执行结果处理catch和finally
+        (let ((after-catch-result 
+               (cond
+                 ;; 如果是异常并且有catch子句
+                 [(and (list? try-result) (not (null? try-result)) 
+                       (eq? (car try-result) 'exception)
+                       catch-clause)
+                  (let* ((exception-val (cadr try-result))
+                         (exception-state (caddr try-result))
+                         (catch-var (if (>= (length catch-clause) 3)
+                                        (cadr catch-clause)
+                                        'e))
+                         (catch-body (if (>= (length catch-clause) 3)
+                                         (caddr catch-clause)
+                                         (cadr catch-clause)))
+                         (catch-env (push-layer exception-state))
+                         (env-with-exc (state-declare catch-var exception-val catch-env)))
+                    (M_state_block catch-body env-with-exc return break continue throw))]
+                 
+                 ;; 如果是异常但没有catch子句
+                 [(and (list? try-result) (not (null? try-result)) 
+                       (eq? (car try-result) 'exception))
+                  (if finally-clause
+                      ;; 有finally子句，执行finally后重新抛出异常
+                      (let* ((exception-val (cadr try-result))
+                             (exception-state (caddr try-result))
+                             (finally-body (cadr finally-clause))
+                             (finally-env (push-layer exception-state)))
+                        (M_state_block finally-body finally-env return break continue throw)
+                        ;; 执行后继续抛出异常
+                        (throw exception-val exception-state))
+                      ;; 没有finally子句，直接重新抛出异常
+                      (let ((exception-val (cadr try-result))
+                            (exception-state (caddr try-result)))
+                        (throw exception-val exception-state)))]
+                 
+                 ;; 返回值处理
+                 [(and (list? try-result) (not (null? try-result)) 
+                       (eq? (car try-result) 'return))
+                  (if finally-clause
+                      ;; 有finally子句，执行finally后返回
+                      (let* ((return-val (cadr try-result))
+                             (finally-body (cadr finally-clause))
+                             (finally-env (push-layer state)))
+                        (M_state_block finally-body finally-env return break continue throw)
+                        ;; 执行后继续返回
+                        (return return-val))
+                      ;; 没有finally子句，直接返回
+                      (return (cadr try-result)))]
+                 
+                 ;; break处理
+                 [(and (list? try-result) (not (null? try-result)) 
+                       (eq? (car try-result) 'break))
+                  (if finally-clause
+                      ;; 有finally子句，执行finally后break
+                      (let* ((break-state (cadr try-result))
+                             (finally-body (cadr finally-clause))
+                             (finally-env (push-layer state)))
+                        (M_state_block finally-body finally-env return break continue throw)
+                        ;; 执行后继续break
+                        (break break-state))
+                      ;; 没有finally子句，直接break
+                      (break (cadr try-result)))]
+                 
+                 ;; continue处理
+                 [(and (list? try-result) (not (null? try-result)) 
+                       (eq? (car try-result) 'continue))
+                  (if finally-clause
+                      ;; 有finally子句，执行finally后continue
+                      (let* ((continue-state (cadr try-result))
+                             (finally-body (cadr finally-clause))
+                             (finally-env (push-layer state)))
+                        (M_state_block finally-body finally-env return break continue throw)
+                        ;; 执行后继续continue
+                        (continue continue-state))
+                      ;; 没有finally子句，直接continue
+                      (continue (cadr try-result)))]
+                 
+                 ;; 正常执行结果
+                 [else
+                  (if finally-clause
+                      ;; 有finally子句，执行finally后返回状态
+                      (let* ((finally-body (cadr finally-clause))
+                             (finally-env (push-layer state)))
+                        (M_state_block finally-body finally-env return break continue throw))
+                      ;; 没有finally子句，直接返回try结果
+                      try-result)])))
+          
+          ;; 返回最终结果
+          after-catch-result)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Merging States / Layers
@@ -453,17 +550,20 @@
           (call/cc
            (lambda (return)
              (let* ((program (parser filename))
-                    (global-state (M_state_list program (make-state) return
-                                               (lambda (s) (error "Error: break outside loop"))
-                                               (lambda (s) (error "Error: continue outside loop"))
-                                               (lambda (v s) (error "Error: uncaught exception" v))))
-                    (main-closure (state-lookup 'main global-state)))
-               (if (not (closure? main-closure))
-                   (error "Error: no main function defined or main is not a function")
-                   (call-function main-closure '() global-state return
-                                 (lambda (s) (error "Error: break outside loop"))
-                                 (lambda (s) (error "Error: continue outside loop"))
-                                 (lambda (v s) (error "Error: uncaught exception" v))))))))))
+                    (global-state (make-state))
+                    ;; 执行整个程序
+                    (final-state (M_state_list program global-state return
+                                              (lambda (s) (error "Error: break outside loop"))
+                                              (lambda (s) (error "Error: continue outside loop"))
+                                              (lambda (v s) (error "Error: uncaught exception" v)))))
+               ;; 查找并调用main函数
+               (let ((main-closure (state-lookup 'main final-state)))
+                 (if (closure? main-closure)
+                     (call-function main-closure '() final-state return
+                                   (lambda (s) (error "Error: break outside loop"))
+                                   (lambda (s) (error "Error: continue outside loop"))
+                                   (lambda (v s) (error "Error: uncaught exception" v)))
+                     (error "Error: no main function defined or main is not a function")))))))))
      '("test1.txt" "test2.txt" "test3.txt" "test4.txt" "test5.txt"
        "test6.txt" "test7.txt" "test8.txt" "test9.txt" "test10.txt"
        "test11.txt" "test12.txt" "test13.txt" "test14.txt" "test15.txt"
@@ -477,4 +577,46 @@
        "3test11.txt" "3test12.txt" "3test13.txt" "3test14.txt" "3test15.txt"
        "3test16.txt" "3test17.txt" "3test18.txt" "3test19.txt" "3test20.txt"))))
 
-(test-all)
+(define test-specific
+  (lambda (filename)
+    (printf "Testing ~a\n" filename)
+    (with-handlers ([exn:fail?
+                     (lambda (e)
+                       (printf "ERROR: ~a\n" (exn-message e)))])
+      ((lambda (result)
+         (printf "Result: ~a\n"
+                 (cond
+                   [(eq? result #t) "true"]
+                   [(eq? result #f) "false"]
+                   [else result])))
+       ;; 创建一个独立的解释器执行文件
+       (call/cc
+        (lambda (return)
+          (let* ((program (parser filename))
+                 (global-state (make-state))
+                 ;; 执行整个程序
+                 (final-state (M_state_list program global-state return
+                                           (lambda (s) (error "Error: break outside loop"))
+                                           (lambda (s) (error "Error: continue outside loop"))
+                                           (lambda (v s) (error "Error: uncaught exception" v)))))
+            ;; 查找并调用main函数
+            (let ((main-closure (state-lookup 'main final-state)))
+              (if (closure? main-closure)
+                  (call-function main-closure '() final-state return
+                                (lambda (s) (error "Error: break outside loop"))
+                                (lambda (s) (error "Error: continue outside loop"))
+                                (lambda (v s) (error "Error: uncaught exception" v)))
+                  (error "Error: no main function defined or main is not a function"))))))))))
+
+;; 运行所有测试
+;; (test-all)
+
+;; 或者运行特定测试（取消注释以测试特定文件）
+;; (test-specific "3test1.txt")  ;; 测试1
+;; (test-specific "3test4.txt")  ;; 测试4
+;; (test-specific "3test5.txt")  ;; 测试5
+;; (test-specific "3test14.txt") ;; 测试14
+;; (test-specific "3test15.txt") ;; 测试15
+;; (test-specific "3test16.txt") ;; 测试16
+(test-specific "3test19.txt") ;; 测试19
+(test-specific "3test20.txt") ;; 测试20
