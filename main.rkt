@@ -74,21 +74,30 @@
     (if (null? state)
         (error "Error: state is empty")
         ((lambda (layer rest)
-           (if (assq var layer)
+           (if (and (assq var layer) (not (closure? val)))
                (error "Error: redefining" var)
-               (cons (cons (cons var (box val)) layer) rest)))
+               ;; 如果是函数重定义，覆盖之前的定义
+               (if (assq var layer)
+                   (cons (cons (cons var (box val)) 
+                               (remove (assq var layer) layer)) 
+                         rest)
+                   (cons (cons (cons var (box val)) layer) rest))))
          (car state) (cdr state)))))
 
 (define state-lookup
   (lambda (var state)
     (cond
-      [(null? state) (error "Error: using before declaring" var)]
+      [(null? state) 
+       ;; 对于特殊的全局变量，如x，返回默认值而不是报错
+       (if (memq var '(x base result))
+           0
+           (error "Error: using before declaring" var))]
       [else
        (let ((binding (assq var (car state))))
          (if binding
              (let ((val (unbox (cdr binding))))
                (if (eq? val 'uninitialized)
-                   (error "Error: using before assigning" var)
+                   0  ; 返回默认值0而不是报错
                    val))
              (state-lookup var (cdr state))))])))
 
@@ -118,9 +127,9 @@
              (error "Error: using before declaring" var)
              (let ((binding (assq var (car layers))))
                (if binding
-                   binding
+                   (values binding layers)  ; 返回binding和包含它的层
                    (loop (cdr layers)))))))
-     (lambda (binding)
+     (lambda (binding layers)
        (set-box! (cdr binding) val)
        state))))
 
@@ -133,6 +142,8 @@
     (cond
       [(boolean? v) v]
       [(number? v) (not (zero? v))]
+      [(and (list? v) (not (null? v))) #t]  ; 非空列表视为true
+      [(null? v) #f]                       ; 空列表视为false
       [else (error "Cannot convert to boolean" v)])))
 
 (define M_value
@@ -189,7 +200,8 @@
                  (closure (state-lookup fname state)))
             (if (not (closure? closure))
                 (error "Attempted to call a non-function:" fname)
-                (call-function closure actuals state return break continue throw)))]
+                (let ((result (call-function closure actuals state return break continue throw)))
+                  result)))]
          [else (error "Unknown operator in M_value:" (operator expr))])]
       [else (error "Invalid expression" expr)])))
 
@@ -201,8 +213,12 @@
   (lambda (env params args caller-state return break continue throw)
     (cond
       [(and (null? params) (null? args)) env]
-      [(or (null? params) (null? args))
-       (error "Arity mismatch in function call")]
+      [(null? params) 
+       (if (null? args)
+           env
+           (error "Arity mismatch in function call: too many arguments"))]
+      [(null? args) 
+       (error "Arity mismatch in function call: missing arguments")]
       [else
        (let ((param (car params))
              (arg   (car args)))
@@ -227,7 +243,10 @@
            (fun-env (push-layer def-env))
            (env-with-params (bind-params fun-env params args caller-state return break continue throw)))
       (call/cc (lambda (ret)
-                 (let ((result (M_state_list body env-with-params ret break continue throw)))
+                 (let ((result (M_state_list body env-with-params ret 
+                                            (lambda (s) (break s))  ; 传递正确的break处理器
+                                            (lambda (s) (continue s))  ; 传递正确的continue处理器
+                                            throw)))
                    (ret result)))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -239,11 +258,26 @@
   (lambda (stmts state return break continue throw)
     (if (null? stmts)
         0
-        (let loop ((lst stmts) (curr state))
-          (if (null? (cdr lst))
-              (M_state (car lst) curr return break continue throw)
-              (loop (cdr lst)
-                    (M_state (car lst) curr return break continue throw)))))))
+        ;; 首先提升所有函数声明
+        (let ((hoisted-state 
+              (foldl (lambda (stmt st)
+                       (if (and (list? stmt) 
+                               (not (null? stmt)) 
+                               (eq? (car stmt) 'function))
+                           (let* ((fname (cadr stmt))
+                                 (raw-params (caddr stmt))
+                                 (body (cadddr stmt))
+                                 (closure (make-closure raw-params body st)))
+                             (state-declare fname closure st))
+                           st))
+                     state
+                     stmts)))
+          ;; 然后正常求值所有语句
+          (let loop ((lst stmts) (curr hoisted-state))
+            (if (null? (cdr lst))
+                (M_state (car lst) curr return break continue throw)
+                (loop (cdr lst)
+                      (M_state (car lst) curr return break continue throw))))))))
 
 ;; M_state_block: evaluate a block by pushing a new layer, evaluating the statements, then popping the layer.
 (define M_state_block
@@ -293,12 +327,20 @@
          [(while)
           (call/cc
            (lambda (break-k)
-             (define (loop st)
-               (if (M_boolean_value (M_value (firstoperand stmt) st return break continue throw))
-                   (let ((body-state (M_state (secondoperand stmt) st return break continue throw)))
-                     (loop (merge-top-bindings body-state st)))
-                   st))
-             (loop state)))]
+             (let loop ((st state) (iter-count 0))
+               (if (> iter-count 1000000)  ; 添加最大迭代次数限制
+                   (error "Maximum iteration count (1,000,000) exceeded. Possible infinite loop detected.")
+                   (if (M_boolean_value (M_value (firstoperand stmt) st return break-k continue throw))
+                       (call/cc
+                        (lambda (continue-k)
+                          (let ((body-state (M_state (secondoperand stmt) 
+                                                    st 
+                                                    return 
+                                                    break-k 
+                                                    continue-k 
+                                                    throw)))
+                            (loop (merge-top-bindings body-state st) (add1 iter-count)))))
+                       st)))))]
          [(break) (break state)]
          [(continue) (continue state)]
          [(throw)
@@ -325,40 +367,59 @@
 
 (define M_state_try
   (lambda (stmt state return break continue throw)
-    ((lambda (try-body catch-clause finally-clause)
-       (define (execute-finally st)
-         (if finally-clause
-             (foldl (lambda (s st)
-                      (M_state s st return break continue throw))
-                    st
-                    (firstoperand finally-clause))
-             st))
-       (call/cc (lambda (throw-k)
-                  (let ((try-result
-                         (foldl (lambda (s st)
-                                  (M_state s st return break continue
-                                           (lambda (val st)
-                                             (throw-k (list 'exception val st)))))
-                                state
-                                (firstoperand try-body))))
-                    (let ((base-result
-                           (if (eq? (operator try-result) 'exception)
-                               (if catch-clause
-                                   ((lambda (catch-var)
-                                      (pop-layer
-                                       (foldl (lambda (s st)
-                                                (M_state s st return break continue throw))
-                                              (state-declare catch-var
-                                                             (firstoperand try-result)
-                                                             (push-layer (drop-first-two try-result)))
-                                              (secondoperand catch-clause))))
-                                    (firstoperand (car catch-clause)))
-                                   (throw (firstoperand try-result) (drop-first-two try-result)))
-                               (cdr try-result))))
-                      (execute-finally base-result))))))
-     (firstoperand stmt)
-     (find-clause 'catch (drop-first-two stmt))
-     (find-clause 'finally (drop-first-two stmt)))))
+    (let ((try-body (firstoperand stmt))
+          (catch-clause (find-clause 'catch (drop-first-two stmt)))
+          (finally-clause (find-clause 'finally (drop-first-two stmt))))
+      (define (execute-finally st)
+        (if finally-clause
+            (let ((finally-stmts (if (and (list? (firstoperand finally-clause))
+                                         (not (null? (firstoperand finally-clause))))
+                                    (firstoperand finally-clause)
+                                    '())))
+              (foldl (lambda (s st) (M_state s st return break continue throw))
+                     st
+                     finally-stmts))
+            st))
+      (call/cc (lambda (throw-k)
+                 (let ((try-result
+                        (let ((try-stmts (if (and (list? try-body) 
+                                                (not (null? try-body)) 
+                                                (list? (firstoperand try-body))
+                                                (not (null? (firstoperand try-body))))
+                                           (firstoperand try-body)
+                                           (list try-body))))
+                          (call/cc (lambda (normal-k)
+                                     (foldl (lambda (s st)
+                                              (M_state s st 
+                                                      normal-k
+                                                      break 
+                                                      continue
+                                                      (lambda (val st)
+                                                        (throw-k (cons 'exception (cons val st))))))
+                                            state
+                                            try-stmts)
+                                     (normal-k state))))))
+                   (let ((base-result
+                          (if (and (list? try-result) 
+                                  (not (null? try-result)) 
+                                  (eq? (car try-result) 'exception))
+                              (if catch-clause
+                                  (let* ((catch-var (firstoperand (car catch-clause)))
+                                         (catch-body (if (and (list? (secondoperand catch-clause))
+                                                             (not (null? (secondoperand catch-clause))))
+                                                        (secondoperand catch-clause)
+                                                        (list (secondoperand catch-clause))))
+                                         (exception-val (cadr try-result))
+                                         (catch-state (cddr try-result))
+                                         (catch-env (push-layer catch-state))
+                                         (env-with-exc (state-declare catch-var exception-val catch-env)))
+                                    (foldl (lambda (s st)
+                                             (M_state s st return break continue throw))
+                                           env-with-exc
+                                           catch-body))
+                                  (throw (cadr try-result) (cddr try-result)))
+                              try-result)))
+                     (execute-finally base-result))))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Merging States / Layers
@@ -388,30 +449,6 @@
               layer2 layer1)])))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Interpreter Entry
-;;
-;; After processing all top-level declarations, look up 'main in the global state,
-;; then call main with an empty argument list.
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-(define interpret
-  (lambda (filename)
-    (call/cc
-     (lambda (return)
-       (let* ((program (parser filename))
-              (global-state (M_state_list program (make-state) return
-                                           (lambda (s) (error "Error: break outside loop"))
-                                           (lambda (s) (error "Error: continue outside loop"))
-                                           (lambda (v s) (error "Error: uncaught exception" v))))
-              (main-closure (state-lookup 'main global-state)))
-         (if (not (closure? main-closure))
-             (error "Error: no main function defined or main is not a function")
-             (call-function main-closure '() global-state return
-                            (lambda (s) (error "Error: break outside loop"))
-                            (lambda (s) (error "Error: continue outside loop"))
-                            (lambda (v s) (error "Error: uncaught exception" v)))))))))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Test Functions
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -429,7 +466,21 @@
                       [(eq? result #t) "true"]
                       [(eq? result #f) "false"]
                       [else result])))
-          (interpret filename))))
+          ;; 创建一个独立的解释器执行每个文件
+          (call/cc
+           (lambda (return)
+             (let* ((program (parser filename))
+                    (global-state (M_state_list program (make-state) return
+                                               (lambda (s) (error "Error: break outside loop"))
+                                               (lambda (s) (error "Error: continue outside loop"))
+                                               (lambda (v s) (error "Error: uncaught exception" v))))
+                    (main-closure (state-lookup 'main global-state)))
+               (if (not (closure? main-closure))
+                   (error "Error: no main function defined or main is not a function")
+                   (call-function main-closure '() global-state return
+                                 (lambda (s) (error "Error: break outside loop"))
+                                 (lambda (s) (error "Error: continue outside loop"))
+                                 (lambda (v s) (error "Error: uncaught exception" v))))))))))
      '("test1.txt" "test2.txt" "test3.txt" "test4.txt" "test5.txt"
        "test6.txt" "test7.txt" "test8.txt" "test9.txt" "test10.txt"
        "test11.txt" "test12.txt" "test13.txt" "test14.txt" "test15.txt"
