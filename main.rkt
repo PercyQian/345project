@@ -6,6 +6,8 @@
 ;; and call-by-reference (with extra processing).
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+;; use functionParser.rkt to parse the input file of 3test.txt
+;; use simple-parser.rkt to parse the input file of 1test.txt and 2test.txt
 (require "functionParser.rkt")
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
