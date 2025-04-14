@@ -12,7 +12,14 @@
 
 ;; use functionParser.rkt to parse the input file of 3test.txt
 ;; use simple-parser.rkt to parse the input file of 1test.txt and 2test.txt
-(require "functionParser.rkt")
+(require (prefix-in func: "functionParser.rkt")
+         (prefix-in simple: "simpleParser.rkt"))
+
+;; Create a wrapper function that chooses the correct parser based on filename
+(define (parser filename)
+  (cond
+    [(regexp-match #rx"^3test" filename) (func:parser filename)]
+    [else (simple:parser filename)]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Operator Accessors for Lists
