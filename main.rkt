@@ -404,102 +404,98 @@
                 (M_state_block
                  try-body
                  state
-                 (lambda (v) (throw-k (list 'return v)))  ;; 捕获return
-                 (lambda (s) (throw-k (list 'break s)))   ;; 捕获break
-                 (lambda (s) (throw-k (list 'continue s))) ;; 捕获continue
-                 (lambda (val st)                         ;; 捕获异常
+                 (lambda (v) (throw-k (list 'return v)))
+                 (lambda (s) (throw-k (list 'break s)))
+                 (lambda (s) (throw-k (list 'continue s)))
+                 (lambda (val st)
                    (throw-k (list 'exception val st))))))))
         
-        ;; 根据try执行结果处理catch和finally
-        (let ((after-catch-result 
-               (cond
-                 ;; 如果是异常并且有catch子句
-                 [(and (list? try-result) (not (null? try-result)) 
-                       (eq? (car try-result) 'exception)
-                       catch-clause)
-                  (let* ((exception-val (cadr try-result))
-                         (exception-state (caddr try-result))
-                         (catch-var (if (>= (length catch-clause) 3)
-                                        (cadr catch-clause)
-                                        'e))
-                         (catch-body (if (>= (length catch-clause) 3)
-                                         (caddr catch-clause)
-                                         (cadr catch-clause)))
-                         (catch-env (push-layer exception-state))
-                         (env-with-exc (state-declare catch-var exception-val catch-env)))
-                    (M_state_block catch-body env-with-exc return break continue throw))]
-                 
-                 ;; 如果是异常但没有catch子句
-                 [(and (list? try-result) (not (null? try-result)) 
-                       (eq? (car try-result) 'exception))
-                  (if finally-clause
-                      ;; 有finally子句，执行finally后重新抛出异常
-                      (let* ((exception-val (cadr try-result))
-                             (exception-state (caddr try-result))
-                             (finally-body (cadr finally-clause))
-                             (finally-env (push-layer exception-state)))
-                        (M_state_block finally-body finally-env return break continue throw)
-                        ;; 执行后继续抛出异常
-                        (throw exception-val exception-state))
-                      ;; 没有finally子句，直接重新抛出异常
-                      (let ((exception-val (cadr try-result))
-                            (exception-state (caddr try-result)))
-                        (throw exception-val exception-state)))]
-                 
-                 ;; 返回值处理
-                 [(and (list? try-result) (not (null? try-result)) 
-                       (eq? (car try-result) 'return))
-                  (if finally-clause
-                      ;; 有finally子句，执行finally后返回
-                      (let* ((return-val (cadr try-result))
-                             (finally-body (cadr finally-clause))
-                             (finally-env (push-layer state)))
-                        (M_state_block finally-body finally-env return break continue throw)
-                        ;; 执行后继续返回
-                        (return return-val))
-                      ;; 没有finally子句，直接返回
-                      (return (cadr try-result)))]
-                 
-                 ;; break处理
-                 [(and (list? try-result) (not (null? try-result)) 
-                       (eq? (car try-result) 'break))
-                  (if finally-clause
-                      ;; 有finally子句，执行finally后break
-                      (let* ((break-state (cadr try-result))
-                             (finally-body (cadr finally-clause))
-                             (finally-env (push-layer state)))
-                        (M_state_block finally-body finally-env return break continue throw)
-                        ;; 执行后继续break
-                        (break break-state))
-                      ;; 没有finally子句，直接break
-                      (break (cadr try-result)))]
-                 
-                 ;; continue处理
-                 [(and (list? try-result) (not (null? try-result)) 
-                       (eq? (car try-result) 'continue))
-                  (if finally-clause
-                      ;; 有finally子句，执行finally后continue
-                      (let* ((continue-state (cadr try-result))
-                             (finally-body (cadr finally-clause))
-                             (finally-env (push-layer state)))
-                        (M_state_block finally-body finally-env return break continue throw)
-                        ;; 执行后继续continue
-                        (continue continue-state))
-                      ;; 没有finally子句，直接continue
-                      (continue (cadr try-result)))]
-                 
-                 ;; 正常执行结果
-                 [else
-                  (if finally-clause
-                      ;; 有finally子句，执行finally后返回状态
-                      (let* ((finally-body (cadr finally-clause))
-                             (finally-env (push-layer state)))
-                        (M_state_block finally-body finally-env return break continue throw))
-                      ;; 没有finally子句，直接返回try结果
-                      try-result)])))
+        ;; 处理catch和finally
+        (cond
+          ;; 异常情况
+          [(and (list? try-result) (not (null? try-result)) (eq? (car try-result) 'exception))
+           (let* ((exception-val (cadr try-result))
+                  (exception-state (caddr try-result)))
+             (cond 
+               ;; 处理catch子句
+               [catch-clause
+                (let* ((catch-var (if (>= (length catch-clause) 3)
+                                      (cadr catch-clause)
+                                      'e))
+                       (catch-body (if (>= (length catch-clause) 3)
+                                       (caddr catch-clause)
+                                       (cadr catch-clause)))
+                       (catch-env (push-layer exception-state))
+                       ;; 先在环境中声明变量e
+                       (catch-env-with-e (state-declare 'e exception-val catch-env))
+                       ;; 如果变量名不是e，再声明指定的变量
+                       (catch-env-final (if (eq? catch-var 'e)
+                                           catch-env-with-e
+                                           (state-declare catch-var exception-val catch-env-with-e))))
+                  ;; 执行catch块
+                  (let ((catch-result 
+                         (M_state_block catch-body catch-env-final return break continue throw)))
+                    ;; 如果有finally子句
+                    (if finally-clause
+                        (let* ((finally-body (cadr finally-clause))
+                               (finally-env (push-layer catch-result)))
+                          (M_state_block finally-body finally-env return break continue throw))
+                        catch-result)))]
+               ;; 有finally子句但没有catch
+               [finally-clause
+                (let* ((finally-body (cadr finally-clause))
+                       (finally-env (push-layer exception-state)))
+                  ;; 执行finally后重新抛出异常
+                  (M_state_block finally-body finally-env return break continue throw)
+                  (throw exception-val exception-state))]
+               ;; 既没有catch也没有finally，直接重新抛出异常
+               [else (throw exception-val exception-state)]))]
           
-          ;; 返回最终结果
-          after-catch-result)))))
+          ;; 处理return
+          [(and (list? try-result) (not (null? try-result)) (eq? (car try-result) 'return))
+           (if finally-clause
+               ;; 执行finally后返回
+               (let* ((return-val (cadr try-result))
+                      (finally-body (cadr finally-clause))
+                      (finally-env (push-layer state)))
+                 (M_state_block finally-body finally-env return break continue throw)
+                 (return return-val))
+               ;; 直接返回
+               (return (cadr try-result)))]
+          
+          ;; 处理break
+          [(and (list? try-result) (not (null? try-result)) (eq? (car try-result) 'break))
+           (if finally-clause
+               ;; 执行finally后break
+               (let* ((break-state (cadr try-result))
+                      (finally-body (cadr finally-clause))
+                      (finally-env (push-layer state)))
+                 (M_state_block finally-body finally-env return break continue throw)
+                 (break break-state))
+               ;; 直接break
+               (break (cadr try-result)))]
+          
+          ;; 处理continue
+          [(and (list? try-result) (not (null? try-result)) (eq? (car try-result) 'continue))
+           (if finally-clause
+               ;; 执行finally后continue
+               (let* ((continue-state (cadr try-result))
+                      (finally-body (cadr finally-clause))
+                      (finally-env (push-layer state)))
+                 (M_state_block finally-body finally-env return break continue throw)
+                 (continue continue-state))
+               ;; 直接continue
+               (continue (cadr try-result)))]
+          
+          ;; 正常执行完try块
+          [else
+           (if finally-clause
+               ;; 执行finally后返回
+               (let* ((finally-body (cadr finally-clause))
+                      (finally-env (push-layer (if (list? try-result) try-result state))))
+                 (M_state_block finally-body finally-env return break continue throw))
+               ;; 直接返回
+               try-result)])))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Merging States / Layers
