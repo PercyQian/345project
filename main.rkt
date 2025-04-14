@@ -1,5 +1,9 @@
 #lang racket
 
+;; Percy Qian, Xiang Luo, Tongwei Zhang
+;; Group23 for project 3
+;; CSDS 345
+;; 2025-04-13
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; REQUIREMENTS
 ;; Use the new parser that supports nested functions, closures,
