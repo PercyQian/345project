@@ -611,40 +611,36 @@
        "3test11.txt" "3test12.txt" "3test13.txt" "3test14.txt" "3test15.txt"
        "3test16.txt" "3test17.txt" "3test18.txt" "3test19.txt" "3test20.txt"))))
 
-(define test-specific
+(define interpret
   (lambda (filename)
-    (printf "Testing ~a\n" filename)
-    (with-handlers ([exn:fail?
-                     (lambda (e)
-                       (printf "ERROR: ~a\n" (exn-message e)))])
-      (define result
-        (call/cc
-         (lambda (return)
-           (define program (parser filename))
-           (define global-state (make-state))
-           ;; execute the whole program
-           (define final-state (M_state_list program global-state return
-                                          (lambda (s) (error "Error: break outside loop"))
-                                          (lambda (s) (error "Error: continue outside loop"))
-                                          (lambda (v s) (error "Error: uncaught exception" v))))
-           ;; find and call main function
-           (define main-closure (state-lookup 'main final-state))
+    (call/cc
+     (lambda (return)
+       (let* ((program (parser filename))
+              (global-state (make-state))
+              ;; Evaluate all global declarations (functions and vars)
+              (final-state (M_state_list program
+                                         global-state
+                                         return
+                                         (lambda (s) (error "Error: break outside loop"))
+                                         (lambda (s) (error "Error: continue outside loop"))
+                                         (lambda (v s) (error "Error: uncaught exception" v)))))
+         ;; Call main with no arguments
+         (let ((main-closure (state-lookup 'main final-state)))
            (if (closure? main-closure)
-               (call-function main-closure '() final-state return
-                             (lambda (s) (error "Error: break outside loop"))
-                             (lambda (s) (error "Error: continue outside loop"))
-                             (lambda (v s) (error "Error: uncaught exception" v)))
-               (error "Error: no main function defined or main is not a function")))))
-      (printf "Result: ~a\n"
-              (cond
-                [(eq? result #t) "true"]
-                [(eq? result #f) "false"]
-                [else result])))))
+               (call-function main-closure
+                              '()
+                              final-state
+                              return
+                              (lambda (s) (error "Error: break outside loop"))
+                              (lambda (s) (error "Error: continue outside loop"))
+                              (lambda (v s) (error "Error: uncaught exception" v)))
+               (error "Error: no main function defined or main is not a function"))))))))
+
 
 ;; run all tests
 (test-all)
 
 ;; or run specific test (uncomment to test specific file)
-;;(test-specific "3test19.txt")  ;; test 19-exception handling
-;;(test-specific "3test20.txt")  ;; test 20-nested exception handling
-;;(test-specific "3test16.txt")  ;; test 16-function nested function nested function
+(interpret "3test19.txt")  ;; test 19-exception handling
+;;(interpret "3test20.txt")  ;; test 20-nested exception handling
+;;(interpret "3test16.txt")  ;; test 16-function nested function nested function
