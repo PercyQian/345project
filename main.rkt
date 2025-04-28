@@ -12,6 +12,7 @@
 
 ;; use functionParser.rkt to parse the input file of 3test.txt
 ;; use simple-parser.rkt to parse the input file of 1test.txt and 2test.txt
+;; use classParser.rkt to parse the input file of 4test.txt
 (require (prefix-in class:  "classParser.rkt")
          (prefix-in func:   "functionParser.rkt")
          (prefix-in simple: "simpleParser.rkt"))
