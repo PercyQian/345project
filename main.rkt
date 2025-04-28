@@ -12,7 +12,6 @@
 
 ;; use functionParser.rkt to parse the input file of 3test.txt
 ;; use simple-parser.rkt to parse the input file of 1test.txt and 2test.txt
-;; use classParser.rkt to parse the input file of 4test.txt
 (require (prefix-in class:  "classParser.rkt")
          (prefix-in func:   "functionParser.rkt")
          (prefix-in simple: "simpleParser.rkt"))
@@ -677,29 +676,33 @@
         [else (find-this (cdr st))]))
 
 ;; 1.  enhanced state-lookup / update
-(define (state-lookup var state)
-  (with-handlers ([exn:fail?
-                   (λ (e)
-                     (define self (find-this state))
-                     (if (and self (objectC? self)
-                              (member var
-                                      (class-all-fields
-                                       (objectC-class self))))
-                         (get-field self var)
-                         (raise e)))])
-    (base-state-lookup var state)))
+(set! state-lookup
+      (lambda (var state)
+        (with-handlers ([exn:fail?
+                         (λ (e)
+                           (define self (find-this state))
+                           (if (and self (objectC? self)
+                                    (member var
+                                            (class-all-fields
+                                             (objectC-class self))))
+                               (get-field self var)
+                               (raise e)))])
+          (base-state-lookup var state))))
 
+;; same idea for state-update
+(set! state-update
+      (lambda (var val state)
+        (with-handlers ([exn:fail?
+                         (λ (e)
+                           (define self (find-this state))
+                           (if (and self (objectC? self)
+                                    (member var
+                                            (class-all-fields
+                                             (objectC-class self))))
+                               (begin (set-field! self var val) state)
+                               (raise e)))])
+          (base-state-update var val state))))
 
-(define (state-update var val state)
-  (with-handlers ([exn:fail?
-                   (λ (e)
-                     (define self (find-this state))
-                     (if (and self (objectC? self)
-                              (member var (class-all-fields
-                                           (objectC-class self))))
-                         (begin (set-field! self var val) state)
-                         (raise e)))])
-    (base-state-update var val state)))
 
 ;; 2.  ‘new’   -------------------------------------------------------
 (define (eval-new cname state)
