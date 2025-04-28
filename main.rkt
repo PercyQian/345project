@@ -12,14 +12,16 @@
 
 ;; use functionParser.rkt to parse the input file of 3test.txt
 ;; use simple-parser.rkt to parse the input file of 1test.txt and 2test.txt
-(require (prefix-in func: "functionParser.rkt")
+(require (prefix-in class:  "classParser.rkt")
+         (prefix-in func:   "functionParser.rkt")
          (prefix-in simple: "simpleParser.rkt"))
+
 
 ;; Create a wrapper function that chooses the correct parser based on filename
 (define (parser filename)
-  (cond
-    [(regexp-match #rx"^3test" filename) (func:parser filename)]
-    [else (simple:parser filename)]))
+  (cond [(regexp-match #rx"\\.j$"     filename) (class:parser filename)]
+        [(regexp-match #rx"^3test"    filename) (func:parser   filename)]
+        [else                                        (simple:parser filename)]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Operator Accessors for Lists
@@ -562,6 +564,219 @@
              (cons binding (remove (assq var result) result))
              (cons binding result)))
        (foldr add-binding layer2 layer1)])))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;  Section A  —  New data structures for classes & objects
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(struct classC  (name parent                    ; symbol  parent-class or #f
+                      field-names field-inits        ; (list symbol) (list thunk)
+                      methods)                       ; (alist name . closure)
+  #:transparent)
+
+(struct objectC (class fields)                  ; classC   vector-of-values
+  #:transparent)
+
+;; global registry  <symbol,classC>
+(define class-table (make-hash))
+
+(define (get-class sym)
+  (hash-ref class-table sym
+            (λ () (error 'class "undefined class ~a" sym))))
+
+;; helpers ----------------------------------------------------------
+
+(define (class-all-fields C)
+  (if (classC-parent C)
+      (append (class-all-fields (get-class (classC-parent C)))
+              (classC-field-names C))
+      (classC-field-names C)))
+
+(define (lookup-method C m)
+  (cond [(assoc m (classC-methods C))    => cadr]
+        [(classC-parent C) (lookup-method (get-class (classC-parent C)) m)]
+        [else (error 'dot "method ~a not found in ~a (or supers)"
+                     m (classC-name C))]))
+
+(define (field-index C fname)
+  (let loop ([cls C] [offset 0])
+    (define names (classC-field-names cls))
+    (define pos   (index-of names fname))
+    (if pos (+ offset pos)
+        (if (classC-parent cls)
+            (loop (get-class (classC-parent cls))
+                  (+ offset (length names)))
+            (error 'dot "field ~a undefined in class ~a"
+                   fname (classC-name C))))))
+
+(define (get-field obj fname)
+  (vector-ref (objectC-fields obj)
+              (field-index (objectC-class obj) fname)))
+
+(define (set-field! obj fname v)
+  (vector-set! (objectC-fields obj)
+               (field-index (objectC-class obj) fname) v))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;  Section B  —  Building class closures from parse trees
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(define (build-class tree)
+  (match tree
+    [(list 'class name maybe-super body ...)
+     (define parent (and (pair? maybe-super) (cadr maybe-super)))
+     (define fields       '())
+     (define field-inits  '())
+     (define methods      '())
+
+     (for ([stmt body])
+       (match stmt
+         [(list 'var (id) init ...)
+          (set! fields (append fields (list id)))
+          (set! field-inits
+                (append field-inits
+                        (list (λ (st) (if (null? init)
+                                          0
+                                          (M_value (car init) st
+                                                   (λ (_) 0) void void
+                                                   (λ _ (error "init"))))))))]
+         [(list 'function fname params fbody)
+          (set! methods
+                (cons (cons fname
+                            (make-closure params fbody '() fname))
+                      methods))]
+         [(list 'static-function 'main params fbody)
+          (set! methods
+                (cons (cons 'main
+                            (make-closure params fbody '() 'main))
+                      methods))] ;; any other static forms ignored per spec
+         [else (void)]))
+
+     (classC name parent fields field-inits methods)]))
+
+(define (install-classes prog)
+  (for ([clsdef prog])
+    (hash-set! class-table
+               (cadr clsdef)   ; class name
+               (build-class clsdef))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;  Section C  —  Extend the evaluator (new / dot)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; keep originals for fallback
+(define base-M_value   M_value)
+(define base-state-lookup state-lookup)
+(define base-state-update state-update)
+
+;; find ‘this’ up env-stack
+(define (find-this st)
+  (cond [(null? st) #f]
+        [(assq 'this (car st)) => (λ (b) (unbox (cdr b)))]
+        [else (find-this (cdr st))]))
+
+;; 1.  enhanced state-lookup / update
+(define (state-lookup var state)
+  (with-handlers ([exn:fail?
+                   (λ (e)
+                     (define self (find-this state))
+                     (if (and self (objectC? self)
+                              (member var
+                                      (class-all-fields
+                                       (objectC-class self))))
+                         (get-field self var)
+                         (raise e)))])
+    (base-state-lookup var state)))
+
+
+(define (state-update var val state)
+  (with-handlers ([exn:fail?
+                   (λ (e)
+                     (define self (find-this state))
+                     (if (and self (objectC? self)
+                              (member var (class-all-fields
+                                           (objectC-class self))))
+                         (begin (set-field! self var val) state)
+                         (raise e)))])
+    (base-state-update var val state)))
+
+;; 2.  ‘new’   -------------------------------------------------------
+(define (eval-new cname state)
+  (define C (get-class cname))
+  (define init-vec
+    (for/vector ([th (in-list (classC-field-inits C))])
+      (th state)))
+  (objectC C init-vec))
+
+;; 3.  redefine M_value with cases for new / dot  --------------------
+(define (M_value expr state return break continue throw)
+  (cond
+    ;; ---- NEW ------------------------------------------------------
+    [(and (pair? expr) (eq? (car expr) 'new))
+     (eval-new (cadr expr) state)]
+
+    ;; ---- DOT ------------------------------------------------------
+    [(and (pair? expr) (eq? (car expr) 'dot))
+     (define obj (M_value (cadr expr) state return break continue throw))
+     (unless (objectC? obj) (error 'dot "lhs is not an object"))
+     (define id  (caddr expr))
+     (cond
+       ;; method?
+       [(assoc id (classC-methods (objectC-class obj))) =>
+                                                        (λ (pair)
+                                                          (define mclos (cdr pair))
+                                                          ;; produce bound method closure with this=obj
+                                                          (make-closure (closure-params mclos)
+                                                                        (closure-body   mclos)
+                                                                        (state-declare 'this obj (closure-env mclos))
+                                                                        (closure-fname  mclos)))]
+       ;; else field
+       [else (get-field obj id)])]
+
+    ;; otherwise defer to old evaluator -----------------------------
+    [else (base-M_value expr state return break continue throw)]))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;  Section D  —  Interpreter entry-points
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; Original single-argument behaviour kept for old tests.
+(define (interpret file . maybe-class)
+  (if (null? maybe-class)
+      ;; ---------- old Part-3 path ----------
+      (let* ([prog         (parser file)]
+             [global-state (make-state)])
+        (call/cc
+         (λ (ret)
+           (define final-state
+             (M_state_list prog global-state ret
+                           (λ (_) (error "break outside"))
+                           (λ (_) (error "continue outside"))
+                           (λ (v _) (error "uncaught" v))))
+           (define main (state-lookup 'main final-state))
+           (unless (closure? main)
+             (error 'interpret "no main()"))
+           (call-function main '() final-state ret
+                          (λ (_) (error "break outside"))
+                          (λ (_) (error "continue outside"))
+                          (λ (v _) (error "uncaught" v))))))
+
+      ;; ---------- Part-4 class path ----------
+      (let* ([classname (string->symbol (car maybe-class))]
+             [prog      (parser file)])
+        (install-classes prog)
+        (define C      (get-class classname))
+        (define main   (lookup-method C 'main))
+        (unless (closure? main)
+          (error 'interpret "Class ~a has no static main()" classname))
+        (call/cc
+         (λ (ret)
+           (call-function main '() (make-state) ret
+                          (λ (_) (error "break outside"))
+                          (λ (_) (error "continue outside"))
+                          (λ (v _) (error "uncaught" v))))))))
+
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Test Functions
