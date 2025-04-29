@@ -257,9 +257,12 @@
              [(assoc id (classC-methods (objectC-class obj))) =>
                                                              (λ (pair)
                                                                (let ([mclos (cdr pair)])
+                                                                 (define env (if (null? (closure-env mclos))
+                                                                                (make-state)
+                                                                                (closure-env mclos)))
                                                                  (make-closure (closure-params mclos)
                                                                                (closure-body mclos)
-                                                                               (state-declare 'this obj (closure-env mclos))
+                                                                               (state-declare 'this obj env)
                                                                                (closure-fname mclos))))]
              [else (get-field obj id)])))]
       
@@ -856,6 +859,18 @@
 ;;(test-all)
 
 (interpret "4test1.j" "A")
+(interpret "4test2.j" "A")
+(interpret "4test3.j" "A")
+(interpret "4test4.j" "A")
+(interpret "4test5.j" "A")
+(interpret "4test6.j" "A")
+(interpret "4test7.j" "C")
+(interpret "4test8.j" "Square")
+(interpret "4test9.j" "Square")
+(interpret "4test10.j" "List")
+(interpret "4test11.j" "List")
+(interpret "4test12.j" "List")
+(interpret "4test13.j" "C")
 ;; or run specific test (uncomment to test specific file)
 ;;(interpret "3test19.txt")  ;; test 19-exception handling
 ;;(interpret "3test20.txt")  ;; test 20-nested exception handling
