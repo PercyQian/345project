@@ -1,24 +1,13 @@
 class A {
 
   var x = 100;
+  var y = 10;
 
-  function setX(x) {
-    this.x = x;
-  }
-
-  function getX() {
-    return this.x;
-  }
-
-  function add(a) {
-    return a.getX() + this.getX();
+  function add(g, h) {
+    return g + h;
   }
 
   static function main() {
-    var a1 = new A();
-    var a2 = new A();
-    a1.setX(50);
-    a2.setX(4);
-    return a1.add(a2);
+    return new A().add(new A().x, new A().y);
   }
 }

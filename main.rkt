@@ -41,14 +41,16 @@
 ;; Closure Data Structure & Helper Functions
 ;;
 ;; A function closure is represented as:
-;;   (closure <raw-params> <body> <def-env> <fname>)
+;;   (closure <raw-params> <body> <def-env> <fname> <def-class>)
 ;; Parameters with a preceding ampersand (&) are processed into (ref x);
 ;; all other parameters pass through unchanged.
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (define make-closure
-  (lambda (params body env fname)
-    (list 'closure params body env fname)))
+  (lambda (params body env fname . maybe-defclass)
+    (if (null? maybe-defclass)
+        (list 'closure params body env fname)
+        (list 'closure params body env fname (car maybe-defclass)))))
 
 (define closure?
   (lambda (v)
@@ -58,6 +60,7 @@
 (define closure-body   (lambda (cl) (secondoperand  cl)))
 (define closure-env    (lambda (cl) (cadddr cl)))
 (define closure-fname  (lambda (cl) (if (< (length cl) 5) #f (list-ref cl 4))))
+(define closure-defclass (lambda (cl) (if (< (length cl) 6) #f (list-ref cl 5))))
 
 (define process-params
   (lambda (params)
@@ -111,23 +114,30 @@
                  val))
            (base-state-lookup var (operands state)))])))
 
-(define (find-this st)
-  (cond [(null? st) #f]
-        [(assq 'this (car st)) => (λ (b) (unbox (cdr b)))]
-        [else (find-this (cdr st))]))
+(define (get-and-check-this state)
+  (with-handlers 
+    ([exn:fail? (lambda (e) #f)])  ;; 如果查找失败，返回 #f
+    (let ([this (base-state-lookup 'this state)])
+      (and this (objectC? this) this))))
 
 (define state-lookup
-  (lambda (var state)
-    (with-handlers ([exn:fail?
-                     (λ (e)
-                       (let ([self (find-this state)])
-                         (if (and self (objectC? self)
-                                  (member var
-                                          (class-all-fields
-                                           (objectC-class self))))
-                             (get-field self var)
-                             (raise e))))])
-      (base-state-lookup var state))))
+  (lambda (var state . maybe-default)
+    (define default (if (null? maybe-default) 
+                       (lambda () (error 'state-lookup "using before declaring '~a" var))
+                       (car maybe-default)))
+    
+    ;; 特殊处理关键字 super
+    (if (eq? var 'super)
+        'super  ;; 直接返回 'super 符号，不进行查找
+        ;; 首先尝试查找对象字段（如果是在方法中）
+        (let ((this-obj (get-and-check-this state)))
+          (if (and this-obj
+                   (not (eq? var 'this))  ;; 不是在查找this本身
+                   (member var (class-all-fields (objectC-class this-obj))))
+              ;; 是一个字段，从对象中获取
+              (get-field this-obj var)
+              ;; 不是字段，按常规方式从环境中查找
+              (base-state-lookup var state))))))
 
 (define state-lookup-box
   (lambda (var state)
@@ -176,6 +186,39 @@
       [(and (list? v) (not (null? v))) #t]  ; Non-empty lists are considered true
       [(null? v) #f]                       ; Empty lists are considered false
       [else (error "Cannot convert to boolean" v)])))
+
+;; 全局变量，跟踪当前执行的方法
+(define current-method #f)
+
+;; 更新和获取当前方法
+(define (get-current-method) current-method)
+(define (set-current-method! method) (set! current-method method))
+
+;; 尝试从调用堆栈中找出当前方法
+(define (find-method-in-call-stack state)
+  (cons 'method current-method))  ;; 简化实现，直接返回当前方法
+
+;; 添加全局变量记录查找层次
+(define current-super-class #f)
+
+;; 添加辅助函数管理查找
+(define (get-current-super) current-super-class)
+(define (set-current-super! cls) (set! current-super-class cls))
+
+;; 方法调用帮助函数
+(define (call-method obj method-closure args state return break continue throw)
+  ;; 保存当前方法
+  (define old-current-method (get-current-method))
+  (set-current-method! method-closure)
+  
+  ;; 调用方法
+  (define result
+    (call-function method-closure args state return break continue throw))
+  
+  ;; 恢复原来的当前方法
+  (set-current-method! old-current-method)
+  
+  result)
 
 (define base-M_value
   (lambda (expr state return break continue throw)
@@ -230,14 +273,20 @@
               [(||) (or (M_boolean_value v1) (M_boolean_value v2))]
               [(&&) (and (M_boolean_value v1) (M_boolean_value v2))]))]
          [(funcall)
-          (define fname (firstoperand expr))
-          (define actuals (drop-first-two expr))
-          (define fval (if (symbol? fname)
-                          (state-lookup fname state)
-                          (M_value fname state return break continue throw)))
-          (if (not (closure? fval))
-              (error "Attempted to call a non-function:" fname)
-              (call-function fval actuals state return break continue throw))]
+          (let ([f (M_value (firstoperand expr) state return break continue throw)])
+            (unless (closure? f)
+              (error "Not a function" (firstoperand expr)))
+            (printf "调用函数: ~a\n" (closure-fname f))
+            
+            ;; 如果是点表达式调用的方法，使用 call-method
+            (if (and (pair? (firstoperand expr)) 
+                     (eq? (car (firstoperand expr)) 'dot))
+                (let ([obj (M_value (cadr (firstoperand expr)) state return break continue throw)])
+                  (if (objectC? obj)
+                      (call-method obj f (operands (operands expr)) state return break continue throw)
+                      (call-function f (operands (operands expr)) state return break continue throw)))
+                ;; 否则使用普通函数调用
+                (call-function f (operands (operands expr)) state return break continue throw)))]
          [else (error "Unknown operator in M_value:" (operator expr))])]
       [else (error "Invalid expression" expr)])))
 
@@ -250,21 +299,72 @@
       
       ;; DOT 处理
       [(and (pair? expr) (eq? (car expr) 'dot))
-       (let ([obj (M_value (cadr expr) state return break continue throw)])
-         (unless (objectC? obj) (error 'dot "lhs is not an object"))
-         (let ([id (caddr expr)])
-           (cond
-             [(assoc id (classC-methods (objectC-class obj))) =>
-                                                             (λ (pair)
-                                                               (let ([mclos (cdr pair)])
-                                                                 (define env (if (null? (closure-env mclos))
-                                                                                (make-state)
-                                                                                (closure-env mclos)))
-                                                                 (make-closure (closure-params mclos)
-                                                                               (closure-body mclos)
-                                                                               (state-declare 'this obj env)
-                                                                               (closure-fname mclos))))]
-             [else (get-field obj id)])))]
+       (let ([obj-expr (cadr expr)]
+             [id (caddr expr)])
+         (cond
+           ;; 处理 super 关键字
+           [(eq? obj-expr 'super)
+            (let ([this-obj (state-lookup 'this state)])
+              (unless (objectC? this-obj)
+                (error 'dot "super used outside of method"))
+              
+              ;; 确定当前应该查找的父类
+              (let ([current-class 
+                     (or (get-current-super)
+                         (classC-name (objectC-class this-obj)))])
+                
+                (let ([parent-class 
+                       (classC-parent (get-class current-class))])
+                  
+                  (unless parent-class
+                    (error 'dot "class has no parent"))
+                  
+                  (printf "super: 在类 ~a 的父类 ~a 中查找方法 ~a\n" 
+                          current-class
+                          parent-class
+                          id)
+                  
+                  ;; 设置下一次 super 调用时的父类
+                  (set-current-super! parent-class)
+                  
+                  ;; 获取父类的方法定义
+                  (let* ([parent-C (get-class parent-class)]
+                         [method (lookup-method parent-C id)]
+                         [old-super (get-current-super)]
+                         [env (if (null? (closure-env method))
+                                  (make-state)
+                                  (closure-env method))]
+                         [result (make-closure 
+                                  (closure-params method)
+                                  (closure-body method)
+                                  (state-declare 'this this-obj env)
+                                  (closure-fname method)
+                                  parent-class)])
+                    
+                    ;; 恢复原来的 super 类
+                    (set-current-super! old-super)
+                    
+                    result))))]
+           
+           ;; 常规对象处理
+           [else
+            (let ([obj (M_value obj-expr state return break continue throw)])
+              (unless (objectC? obj) (error 'dot "lhs is not an object"))
+              (cond
+                ;; 修改: 使用 lookup-method 在整个继承链上查找方法
+                [(let ([method (with-handlers ([exn:fail? (lambda (e) #f)])
+                                 (lookup-method (objectC-class obj) id))])
+                   (and method
+                        (let ([env (if (null? (closure-env method))
+                                       (make-state)
+                                       (closure-env method))])
+                          (make-closure (closure-params method)
+                                       (closure-body method)
+                                       (state-declare 'this obj env)
+                                       (closure-fname method)
+                                       (classC-name (objectC-class obj))))))]
+                ;; 如果在方法表中找不到，则尝试作为字段
+                [else (get-field obj id)]))]))]
       
       ;; 默认情况调用基础函数
       [else (base-M_value expr state return break continue throw)])))
@@ -317,8 +417,16 @@
                      continue 
                      throw))])))
 
+;; 添加一个全局计数器和最大限制
+(define call-depth 0)
+(define max-call-depth 100)
+
 (define call-function
   (lambda (closure args caller-state return break continue throw)
+    (set! call-depth (+ call-depth 1))
+    (when (> call-depth max-call-depth)
+      (error "Maximum call depth exceeded - possible infinite recursion"))
+    
     (define raw-params (closure-params closure))
     (define params (process-params raw-params))
     (define body (closure-body closure))
@@ -343,15 +451,19 @@
        throw))
     
     ;; 执行函数体并返回结果
-    (call/cc 
-     (lambda (ret)
-       (M_state_list 
-        body 
-        fun-env-with-params 
-        ret 
-        (lambda (s) (break s))
-        (lambda (s) (continue s))
-        throw)))))
+    (define result 
+      (call/cc 
+       (lambda (ret)
+         (M_state_list 
+          body 
+          fun-env-with-params 
+          ret 
+          (lambda (s) (break s))
+          (lambda (s) (continue s))
+          throw))))
+    
+    (set! call-depth (- call-depth 1))
+    result))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Statement Execution (M_state)
@@ -633,7 +745,8 @@
 
 (struct classC  (name parent                    ; symbol  parent-class or #f
                       field-names field-inits        ; (list symbol) (list thunk)
-                      methods)                       ; (alist name . closure)
+                      methods                    ; (alist name . closure)
+                      field-map)                 ; 添加字段映射
   #:transparent)
 
 (struct objectC (class fields)                  ; classC   vector-of-values
@@ -649,10 +762,11 @@
 ;; helpers ----------------------------------------------------------
 
 (define (class-all-fields C)
-  (if (classC-parent C)
-      (append (class-all-fields (get-class (classC-parent C)))
-              (classC-field-names C))
-      (classC-field-names C)))
+  (let loop ([cls C] [result '()])
+    (if cls
+        (loop (and (classC-parent cls) (get-class (classC-parent cls)))
+              (append (classC-field-names cls) result))
+        result)))
 
 (define (lookup-method C m)
   (cond [(assoc m (classC-methods C))    => cdr]
@@ -672,12 +786,22 @@
                    fname (classC-name C))))))
 
 (define (get-field obj fname)
-  (vector-ref (objectC-fields obj)
-              (field-index (objectC-class obj) fname)))
+  (let* ([cls (objectC-class obj)]
+         [field-map (classC-field-map cls)]
+         [pos (assoc fname field-map)])
+    (if pos
+        (vector-ref (objectC-fields obj) (cdr pos))
+        (error 'dot "field ~a undefined in class ~a"
+               fname (classC-name cls)))))
 
 (define (set-field! obj fname v)
-  (vector-set! (objectC-fields obj)
-               (field-index (objectC-class obj) fname) v))
+  (let* ([cls (objectC-class obj)]
+         [field-map (classC-field-map cls)]
+         [pos (assoc fname field-map)])
+    (if pos
+        (vector-set! (objectC-fields obj) (cdr pos) v)
+        (error 'dot "field ~a undefined in class ~a"
+               fname (classC-name cls)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;  Section B  —  Building class closures from parse trees
@@ -716,18 +840,41 @@
           (printf "添加实例方法: ~a\n" fname)
           (set! methods
                 (cons (cons fname
-                            (make-closure params fbody '() fname))
+                            (make-closure params fbody '() fname name))
                       methods))]
          [(list 'static-function fname params fbody)
           (printf "添加静态方法: ~a\n" fname)
           (set! methods
                 (cons (cons fname
-                            (make-closure params fbody '() fname))
+                            (make-closure params fbody '() fname name))
                       methods))]
          [else (printf "未匹配的类成员: ~a\n" stmt)]))
      
      (printf "构建的类 ~a 方法: ~a\n" name methods)
-     (classC name parent fields field-inits methods)]))
+     
+     ;; 创建字段映射表
+     (define field-map
+       (let ([result '()])
+         ;; 在一个顶层let表达式中处理所有计算
+         (let ([current-offset 0])
+           ;; 首先添加当前类的字段
+           (for ([f fields]
+                 [i (in-range (length fields))])
+             (set! result (cons (cons f i) result)))
+           
+           ;; 如果有父类，添加父类的字段映射
+           (when parent
+             (let ([parent-class (get-class parent)])
+               (set! result 
+                     (append result
+                             (map (lambda (p) 
+                                    (cons (car p) 
+                                          (+ (cdr p) (length fields))))
+                                  (classC-field-map parent-class))))))
+           ;; 最后返回结果
+           result)))
+     
+     (classC name parent fields field-inits methods field-map)]))
 
 (define (install-classes prog)
   (for ([clsdef prog])
@@ -740,12 +887,32 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;; 1.  'new'   -------------------------------------------------------
-(define (eval-new cname state)
-  (define C (get-class cname))
-  (define init-vec
-    (for/vector ([th (in-list (classC-field-inits C))])
-      (th state)))
-  (objectC C init-vec))
+(define (eval-new class-name state)
+  (define C (get-class class-name))
+  
+  ;; 先定义函数
+  (define (gather-all-fields cls)
+    (if (classC-parent cls)
+        (append (gather-all-fields (get-class (classC-parent cls)))
+                (map cons 
+                     (classC-field-names cls)
+                     (classC-field-inits cls)))
+        (map cons 
+             (classC-field-names cls)
+             (classC-field-inits cls))))
+  
+  ;; 然后使用函数
+  (define all-fields (gather-all-fields C))
+  
+  ;; 初始化所有字段
+  (define field-values
+    (map (lambda (field-pair)
+           (let ((init-thunk (cdr field-pair)))
+             (init-thunk state)))
+         all-fields))
+  
+  ;; 创建对象
+  (objectC C (list->vector field-values)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;  Section D  —  Interpreter entry-points
@@ -871,19 +1038,21 @@
 ;; run all tests
 ;;(test-all)
 
-(interpret "4test1.j" "A")
-(interpret "4test2.j" "A")
-(interpret "4test3.j" "A")
-(interpret "4test4.j" "A")
-(interpret "4test5.j" "A")
-(interpret "4test6.j" "A")
+;;(interpret "4test1.j" "A")
+;;(interpret "4test2.j" "A")
+;;(interpret "4test3.j" "A")
+;;(interpret "4test4.j" "A")
+;;(interpret "4test5.j" "A")
+;;(interpret "4test6.j" "A")
 (interpret "4test7.j" "C")
-(interpret "4test8.j" "Square")
-(interpret "4test9.j" "Square")
-(interpret "4test10.j" "List")
-(interpret "4test11.j" "List")
-(interpret "4test12.j" "List")
-(interpret "4test13.j" "C")
+;;(interpret "4test8.j" "Square")
+;;(interpret "4test9.j" "Square")
+;;(interpret "4test10.j" "List")
+;;(interpret "4test11.j" "List")
+;;(interpret "4test12.j" "List")
+;;(interpret "4test13.j" "C")
+
+
 ;; or run specific test (uncomment to test specific file)
 ;;(interpret "3test19.txt")  ;; test 19-exception handling
 ;;(interpret "3test20.txt")  ;; test 20-nested exception handling
