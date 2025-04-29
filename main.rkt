@@ -96,7 +96,7 @@
                       (operator state)))
               (operands state)))))
 
-(define state-lookup
+(define base-state-lookup
   (lambda (var state)
     (cond
       [(null? state) 
@@ -109,7 +109,25 @@
              (if (eq? val 'uninitialized)
                  0  ; Return default value 0 instead of reporting an error
                  val))
-           (state-lookup var (operands state)))])))
+           (base-state-lookup var (operands state)))])))
+
+(define (find-this st)
+  (cond [(null? st) #f]
+        [(assq 'this (car st)) => (λ (b) (unbox (cdr b)))]
+        [else (find-this (cdr st))]))
+
+(define state-lookup
+  (lambda (var state)
+    (with-handlers ([exn:fail?
+                     (λ (e)
+                       (let ([self (find-this state)])
+                         (if (and self (objectC? self)
+                                  (member var
+                                          (class-all-fields
+                                           (objectC-class self))))
+                             (get-field self var)
+                             (raise e))))])
+      (base-state-lookup var state))))
 
 (define state-lookup-box
   (lambda (var state)
@@ -159,7 +177,7 @@
       [(null? v) #f]                       ; Empty lists are considered false
       [else (error "Cannot convert to boolean" v)])))
 
-(define M_value
+(define base-M_value
   (lambda (expr state return break continue throw)
     (cond
       [(number? expr) expr]
@@ -222,6 +240,31 @@
               (call-function fval actuals state return break continue throw))]
          [else (error "Unknown operator in M_value:" (operator expr))])]
       [else (error "Invalid expression" expr)])))
+
+(define M_value
+  (lambda (expr state return break continue throw)
+    (cond
+      ;; NEW 处理
+      [(and (pair? expr) (eq? (car expr) 'new))
+       (eval-new (cadr expr) state)]
+      
+      ;; DOT 处理
+      [(and (pair? expr) (eq? (car expr) 'dot))
+       (let ([obj (M_value (cadr expr) state return break continue throw)])
+         (unless (objectC? obj) (error 'dot "lhs is not an object"))
+         (let ([id (caddr expr)])
+           (cond
+             [(assoc id (classC-methods (objectC-class obj))) =>
+                                                             (λ (pair)
+                                                               (let ([mclos (cdr pair)])
+                                                                 (make-closure (closure-params mclos)
+                                                                               (closure-body mclos)
+                                                                               (state-declare 'this obj (closure-env mclos))
+                                                                               (closure-fname mclos))))]
+             [else (get-field obj id)])))]
+      
+      ;; 默认情况调用基础函数
+      [else (base-M_value expr state return break continue throw)])))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Function Call Helpers
@@ -631,7 +674,7 @@
 
      (for ([stmt body])
        (match stmt
-         [(list 'var (id) init ...)
+         [(list 'var id init ...)
           (set! fields (append fields (list id)))
           (set! field-inits
                 (append field-inits
@@ -664,81 +707,13 @@
 ;;  Section C  —  Extend the evaluator (new / dot)
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-;; keep originals for fallback
-(define base-M_value   M_value)
-(define base-state-lookup state-lookup)
-(define base-state-update state-update)
-
-;; find ‘this’ up env-stack
-(define (find-this st)
-  (cond [(null? st) #f]
-        [(assq 'this (car st)) => (λ (b) (unbox (cdr b)))]
-        [else (find-this (cdr st))]))
-
-;; 1.  enhanced state-lookup / update
-(set! state-lookup
-      (lambda (var state)
-        (with-handlers ([exn:fail?
-                         (λ (e)
-                           (define self (find-this state))
-                           (if (and self (objectC? self)
-                                    (member var
-                                            (class-all-fields
-                                             (objectC-class self))))
-                               (get-field self var)
-                               (raise e)))])
-          (base-state-lookup var state))))
-
-;; same idea for state-update
-(set! state-update
-      (lambda (var val state)
-        (with-handlers ([exn:fail?
-                         (λ (e)
-                           (define self (find-this state))
-                           (if (and self (objectC? self)
-                                    (member var
-                                            (class-all-fields
-                                             (objectC-class self))))
-                               (begin (set-field! self var val) state)
-                               (raise e)))])
-          (base-state-update var val state))))
-
-
-;; 2.  ‘new’   -------------------------------------------------------
+;; 1.  'new'   -------------------------------------------------------
 (define (eval-new cname state)
   (define C (get-class cname))
   (define init-vec
     (for/vector ([th (in-list (classC-field-inits C))])
       (th state)))
   (objectC C init-vec))
-
-;; 3.  redefine M_value with cases for new / dot  --------------------
-(define (M_value expr state return break continue throw)
-  (cond
-    ;; ---- NEW ------------------------------------------------------
-    [(and (pair? expr) (eq? (car expr) 'new))
-     (eval-new (cadr expr) state)]
-
-    ;; ---- DOT ------------------------------------------------------
-    [(and (pair? expr) (eq? (car expr) 'dot))
-     (define obj (M_value (cadr expr) state return break continue throw))
-     (unless (objectC? obj) (error 'dot "lhs is not an object"))
-     (define id  (caddr expr))
-     (cond
-       ;; method?
-       [(assoc id (classC-methods (objectC-class obj))) =>
-                                                        (λ (pair)
-                                                          (define mclos (cdr pair))
-                                                          ;; produce bound method closure with this=obj
-                                                          (make-closure (closure-params mclos)
-                                                                        (closure-body   mclos)
-                                                                        (state-declare 'this obj (closure-env mclos))
-                                                                        (closure-fname  mclos)))]
-       ;; else field
-       [else (get-field obj id)])]
-
-    ;; otherwise defer to old evaluator -----------------------------
-    [else (base-M_value expr state return break continue throw)]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;  Section D  —  Interpreter entry-points
@@ -828,9 +803,12 @@
        "3test1.txt" "3test2.txt" "3test3.txt" "3test4.txt" "3test5.txt"
        "3test6.txt" "3test7.txt" "3test8.txt" "3test9.txt" "3test10.txt"
        "3test11.txt" "3test12.txt" "3test13.txt" "3test14.txt" "3test15.txt"
-       "3test16.txt" "3test17.txt" "3test18.txt" "3test19.txt" "3test20.txt"))))
+       "3test16.txt" "3test17.txt" "3test18.txt" "3test19.txt" "3test20.txt"
+       "4test1.txt" "4test2.txt" "4test3.txt" "4test4.txt" "4test5.txt"
+       "4test6.txt" "4test7.txt" "4test8.txt" "4test9.txt" "4test10.txt"
+       "4test11.txt" "4test12.txt" "4test13.txt"))))
 
-(define interpret
+(define interpret-simple
   (lambda (filename)
     (call/cc
      (lambda (return)
@@ -860,6 +838,6 @@
 (test-all)
 
 ;; or run specific test (uncomment to test specific file)
-(interpret "3test19.txt")  ;; test 19-exception handling
+;;(interpret "3test19.txt")  ;; test 19-exception handling
 ;;(interpret "3test20.txt")  ;; test 20-nested exception handling
 ;;(interpret "3test16.txt")  ;; test 16-function nested function nested function
