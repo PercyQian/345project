@@ -920,7 +920,4 @@
 (interpret "4test11.j" "List")
 (interpret "4test12.j" "List")
 (interpret "4test13.j" "C")
-;; or run specific test (uncomment to test specific file)
-;;(interpret "3test19.txt")  ;; test 19-exception handling
-;;(interpret "3test20.txt")  ;; test 20-nested exception handling
-;;(interpret "3test16.txt")  ;; test 16-function nested function nested function
+
