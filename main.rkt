@@ -1,17 +1,10 @@
 #lang racket
 
 ;; Percy Qian, Xiang Luo, Tongwei Zhang
-;; Group23 for project 3
+;; Group23 for project 4
 ;; CSDS 345
-;; 2025-04-13
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; REQUIREMENTS
-;; Use the new parser that supports nested functions, closures,
-;; and call-by-reference (with extra processing).
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; 2025-04-28
 
-;; use functionParser.rkt to parse the input file of 3test.txt
-;; use simple-parser.rkt to parse the input file of 1test.txt and 2test.txt
 (require (prefix-in class:  "classParser.rkt")
          (prefix-in func:   "functionParser.rkt")
          (prefix-in simple: "simpleParser.rkt"))
