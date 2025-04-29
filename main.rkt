@@ -428,24 +428,11 @@
                            (M_value (secondoperand stmt) state return break continue throw)
                            state))]
          [(=)
-          (define lhs (firstoperand stmt))
-          (define rhs (M_value (secondoperand stmt) state return break continue throw))
-          (cond
-            ;; 变量赋值
-            [(symbol? lhs) 
-             (state-update lhs rhs state)]
-            
-            ;; 对象字段赋值
-            [(and (list? lhs) (eq? (operator lhs) 'dot))
-             (define obj (M_value (firstoperand lhs) state return break continue throw))
-             (define field (secondoperand lhs))
-             (unless (objectC? obj) 
-               (error "Left side of field assignment is not an object"))
-             (set-field! obj field rhs)
-             state]
-            
-            ;; 其他情况
-            [else (error "Left side of assignment must be a variable or field")])]
+          (define var (firstoperand stmt))
+          (define val (M_value (secondoperand stmt) state return break continue throw))
+          (if (not (symbol? var))
+              (error "Left side of assignment must be a variable")
+              (state-update var val state))]
          [(return)
           (return (M_value (firstoperand stmt) state return break continue throw))]
          [(if)
