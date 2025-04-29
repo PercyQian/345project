@@ -253,11 +253,11 @@
 (define M_value
   (lambda (expr state return break continue throw)
     (cond
-      ;; NEW 处理
+      ;; NEW processing
       [(and (pair? expr) (eq? (car expr) 'new))
        (eval-new (cadr expr) state)]
       
-      ;; DOT 处理
+      ;; DOT processing
       [(and (pair? expr) (eq? (car expr) 'dot))
  (let* ([lhs (cadr expr)]
         [id  (caddr expr)])
@@ -308,7 +308,7 @@
           [else (get-field obj id)]))]))]
 
       
-      ;; 默认情况调用基础函数
+      ;; Default case calls base function
       [else (base-M_value expr state return break continue throw)])))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -367,7 +367,7 @@
     (define def-env (closure-env closure))
     (define fname (closure-fname closure))
     
-    ;; 确保 def-env 不为空
+    ;; Ensure def-env is not empty
     (define actual-def-env (if (null? def-env) (make-state) def-env))
     
     ;; add function itself to environment to support recursion, then bind parameters
@@ -384,7 +384,7 @@
        continue
        throw))
     
-    ;; 执行函数体并返回结果
+    ;; Execute function body and return result
     (call/cc 
  (lambda (ret)
    (parameterize ([current-class (or (closure-def-class closure)
@@ -476,11 +476,11 @@
           (define lhs (firstoperand stmt))
           (define rhs (M_value (secondoperand stmt) state return break continue throw))
           (cond
-            ;; 变量赋值
+            ;; Variable assignment
             [(symbol? lhs) 
              (state-update lhs rhs state)]
             
-            ;; 对象字段赋值
+            ;; Object field assignment
             [(and (list? lhs) (eq? (operator lhs) 'dot))
              (define obj (M_value (firstoperand lhs) state return break continue throw))
              (define field (secondoperand lhs))
@@ -489,7 +489,7 @@
              (set-field! obj field rhs)
              state]
             
-            ;; 其他情况
+            ;; Other cases
             [else (error "Left side of assignment must be a variable or field")])]
          [(return)
           (return (M_value (firstoperand stmt) state return break continue throw))]
@@ -818,10 +818,10 @@
       ;; ---------- Part-4 class path ----------
       (let* ([classname (string->symbol (car maybe-class))]
              [prog      (parser file)])
-        (printf "解析的程序: ~a\n" prog)
+        (printf "Parsed program: ~a\n" prog)
         (install-classes prog)
         (define C (get-class classname))
-        (printf "类的方法: ~a\n" (classC-methods C))
+        (printf "Class methods: ~a\n" (classC-methods C))
         (define main (lookup-method C 'main))
         (unless (closure? main)
           (error 'interpret "Class ~a has no static main()" classname))
