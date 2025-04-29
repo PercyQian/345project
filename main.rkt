@@ -322,12 +322,15 @@
     (define def-env (closure-env closure))
     (define fname (closure-fname closure))
     
+    ;; 确保 def-env 不为空
+    (define actual-def-env (if (null? def-env) (make-state) def-env))
+    
     ;; add function itself to environment to support recursion, then bind parameters
     (define fun-env-with-params 
       (bind-params 
        (if fname
-           (state-declare fname closure def-env)
-           def-env)
+           (state-declare fname closure actual-def-env)
+           actual-def-env)
        params
        args
        caller-state
@@ -336,7 +339,7 @@
        continue
        throw))
     
-    ;; execute function body and return result
+    ;; 执行函数体并返回结果
     (call/cc 
      (lambda (ret)
        (M_state_list 
@@ -636,7 +639,7 @@
       (classC-field-names C)))
 
 (define (lookup-method C m)
-  (cond [(assoc m (classC-methods C))    => cadr]
+  (cond [(assoc m (classC-methods C))    => cdr]
         [(classC-parent C) (lookup-method (get-class (classC-parent C)) m)]
         [else (error 'dot "method ~a not found in ~a (or supers)"
                      m (classC-name C))]))
@@ -666,15 +669,25 @@
 
 (define (build-class tree)
   (match tree
-    [(list 'class name maybe-super body ...)
+    [(list 'class name maybe-super body-container ...)
      (define parent (and (pair? maybe-super) (cadr maybe-super)))
      (define fields       '())
      (define field-inits  '())
      (define methods      '())
 
+     ;; 解包嵌套的 body
+     (define body (if (and (= (length body-container) 1) 
+                           (list? (car body-container)))
+                      (car body-container)
+                      body-container))
+     
+     (printf "处理类主体: ~a\n" body)
+
      (for ([stmt body])
+       (printf "处理类成员: ~a\n" stmt)
        (match stmt
          [(list 'var id init ...)
+          (printf "添加字段: ~a\n" id)
           (set! fields (append fields (list id)))
           (set! field-inits
                 (append field-inits
@@ -684,17 +697,20 @@
                                                    (λ (_) 0) void void
                                                    (λ _ (error "init"))))))))]
          [(list 'function fname params fbody)
+          (printf "添加实例方法: ~a\n" fname)
           (set! methods
                 (cons (cons fname
                             (make-closure params fbody '() fname))
                       methods))]
-         [(list 'static-function 'main params fbody)
+         [(list 'static-function fname params fbody)
+          (printf "添加静态方法: ~a\n" fname)
           (set! methods
-                (cons (cons 'main
-                            (make-closure params fbody '() 'main))
-                      methods))] ;; any other static forms ignored per spec
-         [else (void)]))
-
+                (cons (cons fname
+                            (make-closure params fbody '() fname))
+                      methods))]
+         [else (printf "未匹配的类成员: ~a\n" stmt)]))
+     
+     (printf "构建的类 ~a 方法: ~a\n" name methods)
      (classC name parent fields field-inits methods)]))
 
 (define (install-classes prog)
@@ -743,9 +759,11 @@
       ;; ---------- Part-4 class path ----------
       (let* ([classname (string->symbol (car maybe-class))]
              [prog      (parser file)])
+        (printf "解析的程序: ~a\n" prog)
         (install-classes prog)
-        (define C      (get-class classname))
-        (define main   (lookup-method C 'main))
+        (define C (get-class classname))
+        (printf "类的方法: ~a\n" (classC-methods C))
+        (define main (lookup-method C 'main))
         (unless (closure? main)
           (error 'interpret "Class ~a has no static main()" classname))
         (call/cc
@@ -835,8 +853,9 @@
 
 
 ;; run all tests
-(test-all)
+;;(test-all)
 
+(interpret "4test1.j" "A")
 ;; or run specific test (uncomment to test specific file)
 ;;(interpret "3test19.txt")  ;; test 19-exception handling
 ;;(interpret "3test20.txt")  ;; test 20-nested exception handling
